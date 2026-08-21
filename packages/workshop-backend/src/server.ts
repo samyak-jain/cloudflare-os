@@ -29,6 +29,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { handleHermesWake } from "./hermes-wake";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -202,7 +203,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (gwConfig) {
       return Promise.resolve({
         enabled: true,
-        enabledProviders: [...gwConfig.providers] as AiModelProvider[],
+        enabledProviders: [
+          ...gwConfig.providers,
+          ...(this.env.HERMES_BASE_URL && this.env.WORKSHOP_API_KEY ? ["hermes"] : []),
+        ] as AiModelProvider[],
       });
     } else {
       return Promise.resolve({ enabled: false });
@@ -794,6 +798,10 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext) {
     let url = new URL(req.url);
+
+    if (url.pathname === "/api/hermes/wake") {
+      return handleHermesWake(req, env, ctx);
+    }
 
     if (url.pathname === SITE_LOGO_PATH) {
       return serveSiteLogo(req, env.BLUEPRINT_CONTENT);

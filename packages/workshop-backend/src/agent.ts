@@ -20,6 +20,10 @@ import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./
 import type { ModelHandle } from "./ai-models";
 import { WORKSHOP_AGENT_TOOL_DEFINITIONS } from "./agent-tool-definitions";
 import {
+  hermesInputText, runHermesTurn, type HermesAttachedTurn, type HermesToolResult,
+  type HermesWorkspaceDelta,
+} from "./hermes-driver";
+import {
   buildCompactionState, buildSummaryPrompt, chatChangeStatuses, COMPACTION_SYSTEM_PROMPT,
   estimateProjectionTokens, findCompactionBoundary, findProtectedFromSequence,
   getModelTokenLimits, isCompactionTurn, protectRetainedReverts, shouldCompactChat,
@@ -284,6 +288,26 @@ export function makeStoredAssistantMessage(message: AssistantMessage): StoredAss
  *   overseer.ts?
  */
 export interface AgentHooks {
+  /** Stable workspace routing identifier used by the Hermes protocol. */
+  getWorkspaceId(): string;
+
+  /** Wake-announced turn to attach on this run, if one was durably registered. */
+  getHermesAttachedTurn(chatId: number): HermesAttachedTurn | undefined;
+
+  /** Record Hermes's session epoch and clear turn-local projection state on an epoch change. */
+  recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void;
+
+  /** Clear a wake attachment only after its terminal event crossed the persistence barrier. */
+  completeHermesAttachedTurn(chatId: number, turnId: string): void;
+
+  /** Read/write the durable `(turn_id, call_id)` execution result cache. */
+  getHermesToolResult(turnId: string, callId: string): HermesToolResult | undefined;
+  putHermesToolResult(chatId: number, turnId: string, callId: string,
+                      result: HermesToolResult): void;
+
+  /** Whether a captured gatekeeper action requires approval before another model step. */
+  hasCapturedActionAwaitingDecision(chatId: number): boolean;
+
   getChatAgentContext(chatId: number): AiChatAgentContext;
 
   /**
@@ -1076,6 +1100,7 @@ export async function runAgent(
 
   // The model context reconstructed from the chat log.
   let modelMessages: Message[] = [];
+  let hermesWorkspaceDeltas: HermesWorkspaceDelta[] = [];
   // Records which chat message produced each model message, so compaction can convert a cut in the
   // prompt back to a durable chat sequence.
   let modelMessageSources: Omit<CompactionProjectionMessage, "message">[] = [];
@@ -1437,6 +1462,12 @@ export async function runAgent(
                           "the user later reverted the file to an earlier version.",
                       isError: true,
                     };
+                    hermesWorkspaceDeltas.push({
+                      deltaId: `chat-${chatId}-seq-${msg.sequence}-reverted-read-` +
+                          hermesWorkspaceDeltas.length,
+                      payload: {type: "stale_read", sequence: msg.sequence,
+                                reason: "reverted", toolCallId: toolCall.toolCallId},
+                    });
                   } else if (toolCall.observedCodeVersion !== undefined) {
                     // A pre-conversion read (from before git-backed code storage): its content
                     // was computed against the retired legacy representation and cannot be
@@ -1470,6 +1501,14 @@ export async function runAgent(
                             "current content.",
                         isError: true,
                       };
+                      hermesWorkspaceDeltas.push({
+                        deltaId: `chat-${chatId}-seq-${msg.sequence}-stale-read-` +
+                            hermesWorkspaceDeltas.length,
+                        payload: {type: "stale_read", sequence: msg.sequence,
+                                  reason: "committed_file_changed",
+                                  toolCallId: toolCall.toolCallId,
+                                  filename: toolCall.input.filename},
+                      });
                     } else {
                       let value = (await hooks.readCommitFiles(toolCall.observedCommit))
                           .get(toolCall.input.filename);
@@ -1711,6 +1750,14 @@ export async function runAgent(
                   "available; read the files to see their current content.)");
             }
             if (observations.length > 0) {
+              hermesWorkspaceDeltas.push({
+                deltaId: `chat-${chatId}-seq-${msg.sequence}-user-changes`,
+                payload: {
+                  type: "user_changes",
+                  sequence: msg.sequence,
+                  observations: observations.map(text => text.slice(0, 128_000)),
+                },
+              });
               let toolCallId = `synthetic_${msg.sequence}`;
               modelMessages.push(makeReplayAssistantMessage([{
                 type: "toolCall",
@@ -1775,6 +1822,15 @@ export async function runAgent(
           arguments: {},
         }], handle.model, msgTimestamp));
         let revertedFromChangeId = changeIdMap.get(msg.revertFrom)!;
+        hermesWorkspaceDeltas.push({
+          deltaId: `chat-${chatId}-seq-${msg.sequence}-revert`,
+          payload: {
+            type: "revert",
+            sequence: msg.sequence,
+            revertFromSequence: msg.revertFrom,
+            revertedFromChangeId,
+          },
+        });
         modelMessages.push({
           role: "toolResult",
           toolCallId,
@@ -2169,7 +2225,7 @@ export async function runAgent(
     : estimateProjectionTokens(projection) + Math.ceil(systemPrompt.length / 4);
 
   let compactionTurn = isCompactionTurn(chatMessages);
-  if (compactionTurn || shouldCompactChat(contextTokens, inputBudget)) {
+  if (!handle.hermes && (compactionTurn || shouldCompactChat(contextTokens, inputBudget))) {
     // Returning below skips the flush that ends a normal turn, so do it here: replay may have
     // re-adopted a crashed turn's unmaterialized rows, creations and binding additions, and they
     // must be covered by a message before this turn stops carrying them. The message lands above
@@ -2887,8 +2943,10 @@ export async function runAgent(
   };
 
   try {
+    let pendingHermesAttachment = handle.hermes ? hooks.getHermesAttachedTurn(chatId) : undefined;
     if (modelMessages.length === 0 ||
-        modelMessages[modelMessages.length - 1].role === "assistant") {
+        (modelMessages[modelMessages.length - 1].role === "assistant" &&
+         !pendingHermesAttachment)) {
       // The log tail ends with a completed assistant response and nothing new has arrived for
       // the model to answer (e.g. the previous turn crashed between persisting its final message
       // and finishing), so there is nothing to run. pi's loop requires the context to end with a
@@ -2905,7 +2963,41 @@ export async function runAgent(
       tools: toolList,
     };
 
-    await runAgentLoopContinue(context, {
+    if (handle.hermes) {
+      let newest = modelMessages[modelMessages.length - 1];
+      let newestSequence = chatMessages[chatMessages.length - 1]?.sequence ?? 0;
+      let attachedTurn = pendingHermesAttachment;
+      await runHermesTurn({
+        ...handle.hermes,
+        workspaceId: hooks.getWorkspaceId(),
+        chatId: `${chatId}`,
+        clientTurnId: `chat-${chatId}-seq-${newestSequence}`,
+        inputText: hermesInputText(newest),
+        tools: toolList,
+        signal: abortSignal,
+        attachedTurn,
+        workspaceDeltas: hermesWorkspaceDeltas,
+        hooks: {
+          emit,
+          getToolResult: (turnId, callId) => hooks.getHermesToolResult(turnId, callId),
+          putToolResult: (turnId, callId, result) =>
+            hooks.putHermesToolResult(chatId, turnId, callId, result),
+          onTurnStarted: (turnId, sessionId) =>
+            hooks.recordHermesTurnStarted(chatId, turnId, sessionId),
+          pauseReasonAfterMessage: () => ++turnCount >= 30
+            ? "turn_cap"
+            : callbackInitiated && !attachedTurn && hooks.activeAgentCallbackCount(chatId) === 0
+            ? "callbacks_complete"
+            : undefined,
+          pauseReasonAfterTool: () => connectionRequested
+            ? "connection_requested"
+            : hooks.hasCapturedActionAwaitingDecision(chatId)
+            ? "awaiting_action_decision"
+            : undefined,
+        },
+      });
+      if (attachedTurn) hooks.completeHermesAttachedTurn(chatId, attachedTurn.turnId);
+    } else await runAgentLoopContinue(context, {
       model: handle.model,
       // Replay already produces LLM-shaped messages; no custom message types exist.
       convertToLlm: (messages) => messages as Message[],

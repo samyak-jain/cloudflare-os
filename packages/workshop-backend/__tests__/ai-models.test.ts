@@ -70,6 +70,25 @@ describe("getModel AI Gateway routing", () => {
     capturedRequests.length = 0;
   });
 
+  it("bypasses AI Gateway and user billing for deployment-owned Hermes", () => {
+    const handle = getModel(env({
+      HERMES_BASE_URL: "https://hermes.example/",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), {
+      provider: "hermes",
+      model: "hermes",
+      apiToken: "user-token-must-not-be-used",
+    }, INITIATOR, {
+      userGateway: {accountId: "user-account", apiKey: "user-gateway-key"},
+    });
+
+    expect(handle.hermes).toEqual({
+      baseUrl: "https://hermes.example",
+      apiKey: "a".repeat(64),
+    });
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+  });
+
   it("routes non-Workers providers through the platform gateway", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },

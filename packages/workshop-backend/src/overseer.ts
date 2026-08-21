@@ -10,6 +10,7 @@ import {
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
+import type { HermesAttachedTurn, HermesToolResult } from "./hermes-driver";
 import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge }
   from "./git-store";
 import { migrateCodeLogToGit } from "./git-migration";
@@ -799,6 +800,36 @@ type ActiveAgentRecord = {
   callbackInitiated: boolean;
 };
 
+type HermesChatRecord = {
+  chatId: number;
+  sessionId?: string;
+  currentTurnId?: string;
+  attachedTurn?: HermesAttachedTurn;
+  modelId: string;
+  initiatorUserId: string;
+  initiator: AiChatAuthorInfo;
+};
+
+/** Authenticated autonomous Hermes turn registration, keyed by producer idempotency key. */
+export type HermesWakeRegistration = {
+  workspaceId: string;
+  chatId: number;
+  sessionId: string;
+  turnId: string;
+  eventsUrl: string;
+  idempotencyKey: string;
+};
+
+type HermesToolResultRecord = HermesToolResult & {
+  chatId: number;
+  turnId: string;
+  callId: string;
+};
+
+function hermesToolResultKey(turnId: string, callId: string): string {
+  return `${turnId.length}:${turnId}${callId}`;
+}
+
 // One agent step's model-facing snapshot (see StoredAssistantMessage in agent.ts), keyed by the
 // chatId.sequence of the step's "message" record.
 type ChatModelDataRecord = {
@@ -1115,6 +1146,24 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // `ActiveAgentRecord`.
       activeAgents: collection<ActiveAgentRecord>()({
         primaryKey: "chatId"
+      }),
+
+      // Hermes owns conversation state, while the Overseer owns its projection and local tool
+      // effects. These records bridge restarts and authenticated autonomous-turn wakes.
+      hermesChats: collection<HermesChatRecord>()({
+        primaryKey: "chatId",
+      }),
+
+      hermesWakes: collection<HermesWakeRegistration>()({
+        primaryKey: "idempotencyKey",
+      }),
+
+      // Exactly one durable local execution result for each remote turn/call identity.
+      hermesToolResults: collection<HermesToolResultRecord>()({
+        primaryKey: record => hermesToolResultKey(record.turnId, record.callId),
+        nonUniqueIndexes: {
+          byChatId(record: HermesToolResultRecord) { return record.chatId; },
+        },
       }),
 
       gadgetResponseDeliveries: collection<ExternalMessageRecord>()({
@@ -5596,6 +5645,18 @@ class OverseerImpl implements AgentHooks {
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
              keepAlive: boolean = false): void {
+    if (aiModel.config.provider === "hermes") {
+      let previous = this.storage.hermesChats.get(chatId);
+      this.storage.hermesChats.put({
+        chatId,
+        sessionId: previous?.sessionId,
+        currentTurnId: previous?.attachedTurn?.turnId ?? previous?.currentTurnId,
+        attachedTurn: previous?.attachedTurn,
+        modelId: aiModel.profile.id,
+        initiatorUserId,
+        initiator,
+      });
+    }
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -5849,7 +5910,11 @@ class OverseerImpl implements AgentHooks {
       liveChat.activeAgentCallbacks.clear();
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
-      if (liveChat.pendingAgentCallbacks.length > 0) {
+      let hermesWake = this.storage.hermesChats.get(chatId);
+      if (hermesWake?.attachedTurn &&
+          hermesWake.currentTurnId !== hermesWake.attachedTurn.turnId && meta) {
+        await this.#startRegisteredHermesWake(hermesWake);
+      } else if (liveChat.pendingAgentCallbacks.length > 0) {
         this.#startAgentForCallbacks(meta, liveChat);
       } else {
         this.#deliverWaitingExternalMessageResponse(chatId);
@@ -6051,6 +6116,111 @@ class OverseerImpl implements AgentHooks {
 
   getChatAgentContext(chatId: number): AiChatAgentContext {
     return this.storage.chatContext.get(chatId) || {chatId};
+  }
+
+  getWorkspaceId(): string {
+    return this.ctx.id.toString();
+  }
+
+  getHermesAttachedTurn(chatId: number): HermesAttachedTurn | undefined {
+    return this.storage.hermesChats.get(chatId)?.attachedTurn;
+  }
+
+  async acceptHermesWake(wake: HermesWakeRegistration): Promise<void> {
+    if (wake.workspaceId !== this.ctx.id.toString()) {
+      throw new Error("Hermes wake workspace does not match this Durable Object.");
+    }
+    let previousWake = this.storage.hermesWakes.get(wake.idempotencyKey);
+    if (previousWake) {
+      if (JSON.stringify(previousWake) !== JSON.stringify(wake)) {
+        throw new Error("Hermes wake idempotency key was reused with a different payload.");
+      }
+      let previousState = this.storage.hermesChats.get(wake.chatId);
+      let previousMeta = this.storage.chatMeta.get(wake.chatId);
+      if (previousState?.attachedTurn && previousMeta && !previousMeta.activeAgent &&
+          !this.isPreparingChatMessage(wake.chatId)) {
+        await this.#startRegisteredHermesWake(previousState);
+      }
+      return;
+    }
+    let state = this.storage.hermesChats.get(wake.chatId);
+    if (!state) throw new Error("Hermes has no established session for this chat.");
+    let meta = this.storage.chatMeta.get(wake.chatId);
+    if (!meta) throw new Error("Hermes wake names a deleted chat.");
+
+    this.ctx.storage.transactionSync(() => {
+      if (state.sessionId && state.sessionId !== wake.sessionId) {
+        this.storage.hermesToolResults.byChatId.delete(wake.chatId);
+      }
+      state.sessionId = wake.sessionId;
+      state.attachedTurn = {
+        turnId: wake.turnId,
+        sessionId: wake.sessionId,
+        eventsUrl: wake.eventsUrl,
+      };
+      this.storage.hermesChats.put(state);
+      this.storage.hermesWakes.put(wake);
+    });
+
+    // Registration above is the acknowledgement barrier. If another turn is still unwinding, its
+    // finally block observes attachedTurn and starts this one after it clears activeAgent.
+    if (meta.activeAgent || this.isPreparingChatMessage(wake.chatId)) return;
+    await this.#startRegisteredHermesWake(state);
+  }
+
+  async #startRegisteredHermesWake(state: HermesChatRecord): Promise<void> {
+    let user = this.users.get(this.users.idFromString(state.initiatorUserId));
+    let context = await user.getChatContext(state.modelId);
+    if (!context.aiModel || context.aiModel.config.provider !== "hermes") {
+      throw new Error("The Hermes model used by this chat is no longer available.");
+    }
+    let freshMeta = this.storage.chatMeta.get(state.chatId);
+    if (!freshMeta || freshMeta.activeAgent) return;
+    freshMeta.activeAgent = context.aiModel.profile;
+    freshMeta.lastActive = this.getChatTimestamp();
+    this.storage.chatMeta.put(freshMeta);
+    this.startAgent(state.chatId, context.aiModel, state.initiator, state.initiatorUserId,
+                    /* callbackInitiated */ true, /* keepAlive */ true);
+  }
+
+  recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void {
+    let record = this.storage.hermesChats.get(chatId);
+    if (!record) throw new Error("Hermes chat state was not registered before turn start.");
+    if (record.sessionId && record.sessionId !== sessionId) {
+      // Hermes changed epochs. Old turn results cannot be projected into the replacement session,
+      // but the user-visible chat log remains an audit history. A wake attachment stays registered
+      // until this turn's terminal persistence barrier so a crash can still reattach it.
+      this.storage.hermesToolResults.byChatId.delete(chatId);
+    }
+    record.sessionId = sessionId;
+    record.currentTurnId = turnId;
+    this.storage.hermesChats.put(record);
+  }
+
+  completeHermesAttachedTurn(chatId: number, turnId: string): void {
+    let record = this.storage.hermesChats.get(chatId);
+    if (record?.attachedTurn?.turnId !== turnId) return;
+    delete record.attachedTurn;
+    this.storage.hermesChats.put(record);
+  }
+
+  getHermesToolResult(turnId: string, callId: string): HermesToolResult | undefined {
+    let record = this.storage.hermesToolResults.get(hermesToolResultKey(turnId, callId));
+    if (!record) return undefined;
+    let {chatId: _chatId, turnId: _turnId, callId: _callId, ...result} = record;
+    return result;
+  }
+
+  putHermesToolResult(chatId: number, turnId: string, callId: string,
+                      result: HermesToolResult): void {
+    let key = hermesToolResultKey(turnId, callId);
+    let previous = this.storage.hermesToolResults.get(key);
+    if (previous) return;
+    this.storage.hermesToolResults.put({chatId, turnId, callId, ...result});
+  }
+
+  hasCapturedActionAwaitingDecision(chatId: number): boolean {
+    return this.#capturedActions.get(chatId)?.awaitDecision ?? false;
   }
 
   // Summarize the workspace's gadgets for the agent: each gadget's identity and named bindings.
@@ -8136,6 +8306,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async alarm() {
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
+  }
+
+  /** Durably register and, when idle, attach an authenticated autonomous Hermes turn. */
+  async acceptHermesWake(wake: HermesWakeRegistration): Promise<void> {
+    await this.impl.acceptHermesWake(wake);
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote

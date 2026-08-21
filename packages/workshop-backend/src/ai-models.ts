@@ -101,6 +101,9 @@ export type ModelHandle = {
    * is safe.
    */
   lastResponse?: { status: number; aiGatewayLogId?: string };
+
+  /** Deployment-owned transport settings when this chat is driven by Hermes. */
+  hermes?: { baseUrl: string; apiKey: string };
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -134,6 +137,7 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
     case "google": return (GOOGLE_MODELS as Record<string, Model<Api>>)[modelId];
     case "cloudflare": return (CLOUDFLARE_WORKERS_AI_MODELS as Record<string, Model<Api>>)[modelId];
     case "ollama": return undefined;
+    case "hermes": return undefined;
     default: return undefined;
   }
 }
@@ -356,6 +360,11 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  // Hermes owns the complete agent loop and its own provider credentials. It must never be routed
+  // through either AI Gateway path or billed to a user's connected Cloudflare account.
+  if (config.provider === "hermes") {
+    return getModelDirect(config, options.sessionAffinity, env);
+  }
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -505,10 +514,44 @@ function getModelViaGateway(
 }
 
 // Direct provider access using the credentials in the model config itself (no AI Gateway).
-function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelHandle {
+function getModelDirect(config: AiModelConfig, sessionAffinity?: string,
+                        env?: Cloudflare.Env): ModelHandle {
   const catalog = catalogModel(config.provider, config.model);
   const window = modelTokenWindow(config, catalog);
   switch (config.provider) {
+    case "hermes": {
+      let baseUrl = env?.HERMES_BASE_URL?.replace(/\/+$/, "");
+      let apiKey = env?.WORKSHOP_API_KEY;
+      if (!baseUrl || !apiKey) {
+        throw new Error(
+            "Hermes is not configured. Set HERMES_BASE_URL and WORKSHOP_API_KEY on the deployment.");
+      }
+      if (!/^[0-9a-f]{64,}$/i.test(apiKey)) {
+        throw new Error("WORKSHOP_API_KEY must contain at least 64 hexadecimal characters.");
+      }
+      let parsedBase = new URL(baseUrl);
+      if (!["https:", "http:"].includes(parsedBase.protocol) ||
+          parsedBase.username || parsedBase.password) {
+        throw new Error("HERMES_BASE_URL must be an HTTP(S) URL without embedded credentials.");
+      }
+      return {
+        model: {
+          id: config.model,
+          name: catalog?.name ?? config.model,
+          api: "openai-completions",
+          provider: "hermes",
+          baseUrl,
+          reasoning: true,
+          input: ["text"],
+          cost: ZERO_COST,
+          ...window,
+        },
+        stream: () => {
+          throw new Error("Hermes models must be invoked through the remote agent driver.");
+        },
+        hermes: {baseUrl, apiKey},
+      };
+    }
     case "anthropic":
       return makeHandle({
         model: {
