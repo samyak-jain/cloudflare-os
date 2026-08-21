@@ -104,5 +104,5 @@ Rework validation:
 - Hermes implementation is committed in `b20ac29` (schema fixtures), `1b48d00` (initial provider
   and driver), and `d40e0f6` (all ten accepted adversarial-review fixes).
 - Draft PR: https://github.com/samyak-jain/cloudflare-os/pull/1
-- No implementation work remains in this rework assignment. Push the recorded validation update to
-  the existing draft PR; the PR remains intentionally unmerged.
+- No implementation work remains in this rework assignment. The fixes and recorded validation are
+  pushed to the existing draft PR; the PR remains intentionally unmerged.
