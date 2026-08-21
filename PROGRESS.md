@@ -49,4 +49,7 @@
 
 ## Remaining
 
-- Commit in logical phases, push, and open the requested draft PR.
+- Hermes implementation is committed in `b20ac29` (schema fixtures) and `1b48d00` (provider,
+  driver, wake/deltas, and tests), and pushed to `origin/hermes-integration`.
+- Draft PR: https://github.com/samyak-jain/cloudflare-os/pull/1
+- No implementation work remains in this assignment; the PR is intentionally unmerged.
