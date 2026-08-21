@@ -1,0 +1,112 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Lena avatar — rig preview</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#12141c; font:12px/1.4 ui-sans-serif,system-ui,sans-serif; color:#8b93a7; }
+  .wrap { display:flex; gap:18px; padding:18px; align-items:flex-start; }
+  .col { display:flex; flex-direction:column; gap:14px; }
+  .card { background:#1b1e28; border:1px solid #2a2f3d; border-radius:10px; padding:10px; }
+  .card.light { background:#eef1f6; } .card.mid { background:#5a6377; }
+  .lbl { font-size:10px; letter-spacing:.08em; text-transform:uppercase; margin-bottom:6px; opacity:.75; }
+  .row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }
+  .circle { border-radius:50%; overflow:hidden; }
+  .grid { display:grid; grid-template-columns:repeat(4,auto); gap:10px; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="col">
+    <div class="card"><div class="lbl">512 master</div><div id="big"></div></div>
+    <div class="card"><div class="lbl">silhouette (backdrop off)</div><div class="row">
+      <div id="sil220" style="filter:brightness(0) saturate(0)"></div>
+      <div id="sil96" style="filter:brightness(0) saturate(0)"></div></div></div>
+  </div>
+  <div class="col">
+    <div class="card"><div class="lbl">face zoom</div><div id="zoom"></div></div>
+  </div>
+  <div class="col">
+    <div class="card light"><div class="lbl" style="color:#555">light bg — 320 / 160 / 120</div><div class="row">
+      <div id="l320"></div><div id="l160"></div><div id="l120"></div></div></div>
+    <div class="card mid"><div class="lbl" style="color:#fff">circle crop — 160 / 120 / 96 / 64</div><div class="row">
+      <div class="circle" id="m160"></div><div class="circle" id="m120"></div>
+      <div class="circle" id="m96"></div><div class="circle" id="m64"></div></div></div>
+    <div class="card"><div class="lbl">rig states</div><div class="grid" id="rig"></div></div>
+  </div>
+</div>
+<script>
+const SIZES = { big:512, zoom:400, sil220:220, sil96:96, l320:320, l160:160, l120:120, m160:160, m120:120, m96:96, m64:64 };
+const MOUTHS = ['closed','half-open','open','smile','frown'];
+async function main(){
+  const txt = await (await fetch('lena.svg')).text();
+  const mk = (size, id) => {
+    const d = document.createElement('div');
+    d.innerHTML = txt;
+    const s = d.querySelector('svg');
+    s.setAttribute('width', size); s.setAttribute('height', size);
+    const suffix = '--' + id;
+    s.querySelectorAll('[id]').forEach(n => {
+      const old = n.id; n.id = old + suffix;
+      d.querySelectorAll('*').forEach(el => {
+        for (const a of Array.from(el.attributes))
+          if (a.value.includes('url(#'+old+')'))
+            el.setAttribute(a.name, a.value.replaceAll('url(#'+old+')','url(#'+old+suffix+')'));
+      });
+    });
+    return { host:d, svg:s, q:(sel)=>s.querySelector(sel.replace(/#([\w-]+)/g,(m,p)=>'#'+CSS.escape(p+suffix))) };
+  };
+  const setMouth = (r, name) => MOUTHS.forEach(m =>
+    r.q('#mouth-'+m).style.display = (m===name ? 'block' : 'none'));
+  const lids = (r, dy) => ['l','r'].forEach(s =>
+    r.q('#eye-'+s+'-lid-upper').setAttribute('transform','translate(0,'+dy+')'));
+
+  for (const [id,size] of Object.entries(SIZES)) {
+    const r = mk(size,id);
+    if (id.startsWith('sil')) r.q('#backdrop').style.display='none';
+    if (id === 'zoom') { r.svg.setAttribute('viewBox','152 88 208 310');
+                         r.svg.setAttribute('height', Math.round(size*310/208)); }
+    document.getElementById(id).appendChild(r.host.firstChild);
+  }
+  const states = [
+    ['neutral',  r => {}],
+    ['blink',    r => lids(r, 34)],
+    ['half-lid', r => lids(r, 15)],
+    ['squint',   r => { lids(r, 10); ['l','r'].forEach(s =>
+                        r.q('#eye-'+s+'-lid-lower').setAttribute('transform','translate(0,-8)')); }],
+    ['tilt L',   r => r.q('#head').setAttribute('transform','rotate(-7 256 420)')],
+    ['tilt R',   r => r.q('#head').setAttribute('transform','rotate(6 256 420)')],
+    ['brow up',  r => { r.q('#brow-l').setAttribute('transform','translate(0,-7)');
+                        r.q('#brow-r').setAttribute('transform','translate(0,-7)'); }],
+    ['brow angry', r => { r.q('#brow-l').setAttribute('transform','rotate(9 240 236)');
+                          r.q('#brow-r').setAttribute('transform','rotate(-9 272 236)'); }],
+    ['m: closed',   r => setMouth(r,'closed')],
+    ['m: half',     r => setMouth(r,'half-open')],
+    ['m: open',     r => setMouth(r,'open')],
+    ['m: smile',    r => setMouth(r,'smile')],
+    ['m: frown',    r => setMouth(r,'frown')],
+    ['hair sway',   r => { r.q('#hair-strand-l').setAttribute('transform','rotate(4 196 208)');
+                           r.q('#hair-strand-l-a').setAttribute('transform','rotate(3 178 210)');
+                           r.q('#hair-strand-l-b').setAttribute('transform','rotate(1.5 190 208)');
+                           r.q('#hair-strand-l-c').setAttribute('transform','rotate(-1 198 206)');
+                           r.q('#hair-strand-r').setAttribute('transform','rotate(-5 314 206)');
+                           r.q('#hair-bangs').setAttribute('transform','rotate(2 292 208)');
+                           r.q('#hair-drape-l').setAttribute('transform','rotate(3 180 328)');
+                           r.q('#hair-drape-r').setAttribute('transform','rotate(-3 322 328)'); }],
+    ['plane offset', r => { r.q('#hair-strand-l-a').setAttribute('transform','rotate(6 178 210)');
+                            r.q('#hair-strand-l-b').setAttribute('transform','rotate(3 190 208)');
+                            r.q('#hair-strand-l-c').setAttribute('transform','rotate(-3 198 206)'); }],
+    ['ribbon flutter', r => r.q('#ribbon').setAttribute('transform','rotate(-8 332 183)')],
+    ['talk + tilt', r => { setMouth(r,'open'); lids(r, 6);
+                           r.q('#head').setAttribute('transform','rotate(-4 256 420)'); }],
+  ];
+  const grid = document.getElementById('rig');
+  for (const [name, fn] of states) {
+    const r = mk(150, 'rig-'+name.replace(/\W+/g,''));
+    try { fn(r); } catch(e) { console.warn(name, e); }
+    const cell = document.createElement('div');
+    const lb = document.createElement('div'); lb.className='lbl'; lb.textContent=name;
+    cell.append(lb, r.host.firstChild); grid.appendChild(cell);
+  }
+  document.title = 'ready';
+}
+main().catch(e => document.body.insertAdjacentHTML('afterbegin','<pre style="color:#f66">'+e.stack+'</pre>'));
+</script>
+</body></html>
