@@ -61,18 +61,18 @@ async function main(){
   for (const [id,size] of Object.entries(SIZES)) {
     const r = mk(size,id);
     if (id.startsWith('sil')) r.q('#backdrop').style.display='none';
-    if (id === 'zoom') { r.svg.setAttribute('viewBox','152 88 208 310');
-                         r.svg.setAttribute('height', Math.round(size*310/208)); }
+    if (id === 'zoom') { r.svg.setAttribute('viewBox','150 136 216 280');
+                         r.svg.setAttribute('height', Math.round(size*280/216)); }
     document.getElementById(id).appendChild(r.host.firstChild);
   }
   const states = [
     ['neutral',  r => {}],
-    ['blink',    r => lids(r, 34)],
-    ['half-lid', r => lids(r, 15)],
-    ['squint',   r => { lids(r, 10); ['l','r'].forEach(s =>
+    ['blink',    r => lids(r, 24)],
+    ['half-lid', r => lids(r, 11)],
+    ['squint',   r => { lids(r, 9); ['l','r'].forEach(s =>
                         r.q('#eye-'+s+'-lid-lower').setAttribute('transform','translate(0,-8)')); }],
-    ['tilt L',   r => r.q('#head').setAttribute('transform','rotate(-7 256 420)')],
-    ['tilt R',   r => r.q('#head').setAttribute('transform','rotate(6 256 420)')],
+    ['tilt L',   r => r.q('#head').setAttribute('transform','rotate(-7 256 430)')],
+    ['tilt R',   r => r.q('#head').setAttribute('transform','rotate(6 256 430)')],
     ['brow up',  r => { r.q('#brow-l').setAttribute('transform','translate(0,-7)');
                         r.q('#brow-r').setAttribute('transform','translate(0,-7)'); }],
     ['brow angry', r => { r.q('#brow-l').setAttribute('transform','rotate(9 240 236)');
@@ -95,7 +95,7 @@ async function main(){
                             r.q('#hair-strand-l-c').setAttribute('transform','rotate(-3 198 206)'); }],
     ['ribbon flutter', r => r.q('#ribbon').setAttribute('transform','rotate(-8 332 183)')],
     ['talk + tilt', r => { setMouth(r,'open'); lids(r, 6);
-                           r.q('#head').setAttribute('transform','rotate(-4 256 420)'); }],
+                           r.q('#head').setAttribute('transform','rotate(-4 256 430)'); }],
   ];
   const grid = document.getElementById('rig');
   for (const [name, fn] of states) {
