@@ -2,61 +2,83 @@ import { describe, expect, it, vi } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
 
+import { runHermesTurn, type HermesDriverHooks, type HermesToolResult } from "../src/hermes-driver";
 import {
-  runHermesTurn, type HermesDriverHooks, type HermesToolResult,
-} from "../src/hermes-driver";
+  HermesToolCallStateMachine,
+  hermesToolCallKey,
+  type HermesToolCallRecord,
+} from "../src/hermes-tool-state";
 
-type EventInput = {seq: number, event: string, [key: string]: unknown};
+type EventInput = { seq: number; event: string; [key: string]: unknown };
 
 function sse(events: EventInput[], sessionId = "session-1", turnId = "turn-1"): Response {
-  let body = events.map(event => `event: ${event.event}\ndata: ${JSON.stringify({
-    protocol_version: 1,
-    turn_id: turnId,
-    session_id: sessionId,
-    timestamp: 1,
-    ...event,
-  })}\n\n`).join("");
-  return new Response(body, {headers: {"Content-Type": "text/event-stream"}});
+  let body = events
+    .map(
+      (event) =>
+        `event: ${event.event}\ndata: ${JSON.stringify({
+          protocol_version: 1,
+          turn_id: turnId,
+          session_id: sessionId,
+          timestamp: 1,
+          ...event,
+        })}\n\n`,
+    )
+    .join("");
+  return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
 }
 
 class FakeHermesServer {
-  requests: {url: URL, method: string, body?: Record<string, unknown>}[] = [];
+  requests: { url: URL; method: string; body?: Record<string, unknown> }[] = [];
   toolResults: Record<string, unknown>[] = [];
   controls: Record<string, unknown>[] = [];
   deltas: Record<string, unknown>[] = [];
   reconnectAfter: string[] = [];
   deltaStatus = 200;
+  eventStatuses: { status: number; retryAfter?: string; body?: string }[] = [];
+  controlStatuses: number[] = [];
 
-  constructor(private initial: EventInput[], private replay: EventInput[] = [],
-              private sessionId = "session-1") {}
+  constructor(
+    private initial: EventInput[],
+    private replay: EventInput[] = [],
+    private sessionId = "session-1",
+  ) {}
 
   fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     let request = new Request(input, init);
     let url = new URL(request.url);
-    let body = request.method === "POST" ? await request.json() as Record<string, unknown> : undefined;
-    this.requests.push({url, method: request.method, body});
+    let body =
+      request.method === "POST" ? ((await request.json()) as Record<string, unknown>) : undefined;
+    this.requests.push({ url, method: request.method, body });
     if (url.pathname === "/api/workshop/v1/turns") {
       return sse(this.initial, this.sessionId);
     }
     if (url.pathname.endsWith("/events")) {
       this.reconnectAfter.push(url.searchParams.get("after_seq") ?? "");
+      let failure = this.eventStatuses.shift();
+      if (failure)
+        return new Response(failure.body ?? "upstream detail", {
+          status: failure.status,
+          headers: failure.retryAfter ? { "Retry-After": failure.retryAfter } : {},
+        });
       return sse(this.replay, this.sessionId);
     }
     if (url.pathname.includes("/tool-results/")) {
       this.toolResults.push(body!);
-      return Response.json({ok: true});
+      return Response.json({ ok: true });
     }
     if (url.pathname.endsWith("/control")) {
       this.controls.push(body!);
-      return Response.json({ok: true});
+      let status = this.controlStatuses.shift();
+      if (status) return new Response("secret provider body", { status });
+      return Response.json({ ok: true });
     }
     if (url.pathname.endsWith("/deltas")) {
       this.deltas.push(body!);
       return this.deltaStatus === 200
-        ? Response.json({accepted: true})
-        : Response.json({error: "session missing"}, {status: this.deltaStatus});
+        ? Response.json({ accepted: true })
+        : Response.json({ error: "session missing" }, { status: this.deltaStatus });
     }
-    return new Response("not found", {status: 404});
+    return new Response("not found", { status: 404 });
   };
 }
 
@@ -65,7 +87,7 @@ function tool(execute: AgentTool["execute"]): AgentTool {
     name: "readFile",
     label: "Read file",
     description: "Read a file.",
-    parameters: Type.Object({filename: Type.String()}),
+    parameters: Type.Object({ filename: Type.String() }),
     execute,
   };
 }
@@ -75,24 +97,33 @@ function harness(server: FakeHermesServer, overrides: Partial<HermesDriverHooks>
   let stored = new Map<string, HermesToolResult>();
   let sessions: string[] = [];
   let hooks: HermesDriverHooks = {
-    emit: event => { events.push(event); },
-    getToolResult: (turnId, callId) => stored.get(`${turnId}.${callId}`),
-    putToolResult: (turnId, callId, result) => { stored.set(`${turnId}.${callId}`, result); },
-    onTurnStarted: (_turnId, sessionId) => { sessions.push(sessionId); },
+    emit: (event) => {
+      events.push(event);
+    },
+    claimToolCall: async (turnId, callId) => {
+      let result = stored.get(`${turnId}.${callId}`);
+      return result ? { execute: false, result } : { execute: true };
+    },
+    resolveToolCall: (turnId, callId, result) => {
+      stored.set(`${turnId}.${callId}`, result);
+    },
+    onTurnStarted: (_turnId, sessionId) => {
+      sessions.push(sessionId);
+    },
     pauseReasonAfterMessage: () => undefined,
     pauseReasonAfterTool: () => undefined,
     ...overrides,
   };
-  return {events, hooks, sessions, stored, fetch: server.fetch};
+  return { events, hooks, sessions, stored, fetch: server.fetch };
 }
 
 function terminalEvents(from = 1): EventInput[] {
   return [
-    {seq: from, event: "turn.started", catalog_version: "catalog"},
-    {seq: from + 1, event: "message.start"},
-    {seq: from + 2, event: "text.delta", delta: "hello"},
-    {seq: from + 3, event: "usage", input_tokens: 3, output_tokens: 2},
-    {seq: from + 4, event: "turn.end", status: "completed", stop_reason: "stop"},
+    { seq: from, event: "turn.started", catalog_version: "catalog" },
+    { seq: from + 1, event: "message.start" },
+    { seq: from + 2, event: "text.delta", delta: "hello" },
+    { seq: from + 3, event: "usage", input_tokens: 3, output_tokens: 2 },
+    { seq: from + 4, event: "turn.end", status: "completed", stop_reason: "stop" },
   ];
 }
 
@@ -107,7 +138,7 @@ describe("Hermes remote driver", () => {
       chatId: "7",
       clientTurnId: "chat-7-seq-3",
       inputText: "new message",
-      tools: [tool(async () => ({content: [{type: "text", text: "unused"}], details: {}}))],
+      tools: [tool(async () => ({ content: [{ type: "text", text: "unused" }], details: {} }))],
       signal: new AbortController().signal,
       hooks: run.hooks,
       fetch: run.fetch,
@@ -116,13 +147,13 @@ describe("Hermes remote driver", () => {
     expect(server.requests[0].body).toMatchObject({
       protocol_version: 1,
       client_turn_id: "chat-7-seq-3",
-      input: {type: "user", text: "new message"},
-      tools: [{name: "readFile", description: "Read a file.", input_schema: {type: "object"}}],
+      input: { type: "user", text: "new message" },
+      tools: [{ name: "readFile", description: "Read a file.", parameters: { type: "object" } }],
     });
-    let end = run.events.find(event => event.type === "turn_end");
+    let end = run.events.find((event) => event.type === "turn_end");
     expect(end).toMatchObject({
       type: "turn_end",
-      message: {stopReason: "stop", usage: {totalTokens: 5}},
+      message: { stopReason: "stop", usage: { totalTokens: 5 } },
     });
   });
 
@@ -130,83 +161,373 @@ describe("Hermes remote driver", () => {
     let server = new FakeHermesServer(terminalEvents().slice(0, 3), terminalEvents(1).slice(3));
     let run = harness(server);
     await runHermesTurn({
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", clientTurnId: "chat-7-seq-4", inputText: "hi", tools: [],
-      signal: new AbortController().signal, hooks: run.hooks, fetch: run.fetch,
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-4",
+      inputText: "hi",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
     });
     expect(server.reconnectAfter).toEqual(["3"]);
-    expect(run.events.some(event => event.type === "turn_end")).toBe(true);
+    expect(run.events.some((event) => event.type === "turn_end")).toBe(true);
+  });
+
+  it("retries reattach 5xx/429 and honors Retry-After without exposing bodies", async () => {
+    let server = new FakeHermesServer(terminalEvents().slice(0, 2), terminalEvents(1).slice(2));
+    server.eventStatuses.push(
+      { status: 503, body: "first sensitive detail" },
+      { status: 429, retryAfter: "2", body: "sensitive provider detail" },
+    );
+    let delays: number[] = [];
+    let run = harness(server);
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-4",
+      inputText: "hi",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+    });
+    expect(delays).toEqual([250, 2000]);
+    expect(server.reconnectAfter).toEqual(["2", "2", "2"]);
+  });
+
+  it("keeps a 202-accepted wake attached across an SSE body failure", async () => {
+    let requests = 0;
+    let initialFrames = terminalEvents()
+      .slice(0, 3)
+      .map(
+        (event) =>
+          `data: ${JSON.stringify({
+            protocol_version: 1,
+            turn_id: "turn-1",
+            session_id: "session-1",
+            timestamp: 1,
+            ...event,
+          })}\n\n`,
+      )
+      .join("");
+    let fetcher: typeof fetch = async (input) => {
+      let url = new URL(input instanceof Request ? input.url : input.toString());
+      requests++;
+      if (requests === 1) {
+        expect(url.pathname).toBe("/api/workshop/v1/turns/turn-1/events");
+        expect(url.searchParams.get("after_seq")).toBe("0");
+        let response = new Response();
+        Object.defineProperty(response, "body", {
+          value: {
+            async *[Symbol.asyncIterator]() {
+              yield new TextEncoder().encode(initialFrames);
+              throw new Error("socket reset");
+            },
+          },
+        });
+        return response;
+      }
+      expect(url.searchParams.get("after_seq")).toBe("3");
+      return sse(terminalEvents().slice(3));
+    };
+    let run = harness(new FakeHermesServer([]));
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "body-reset",
+      inputText: "hi",
+      tools: [],
+      attachedTurn: {
+        turnId: "turn-1",
+        sessionId: "session-1",
+        eventsUrl: "https://hermes.test/api/workshop/v1/turns/turn-1/events",
+        idempotencyKey: "wake-1",
+      },
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: fetcher,
+      sleep: async () => {},
+    });
+    expect(requests).toBe(2);
   });
 
   it("executes a duplicate remote call once and re-posts the durable result", async () => {
     let execute = vi.fn(async () => ({
-      content: [{type: "text" as const, text: "contents"}], details: {observed: true},
+      content: [{ type: "text" as const, text: "contents" }],
+      details: { observed: true },
     }));
     let server = new FakeHermesServer([
-      {seq: 1, event: "turn.started"},
-      {seq: 2, event: "message.start"},
-      {seq: 3, event: "tool_call.start", call_id: "call-1", name: "readFile"},
-      {seq: 4, event: "tool_call.arguments.delta", call_id: "call-1",
-       delta: "{\"filename\":\"a.txt\"}"},
-      {seq: 5, event: "tool_call.end", call_id: "call-1", arguments: {filename: "a.txt"}},
-      {seq: 6, event: "tool_call.start", call_id: "call-1", name: "readFile"},
-      {seq: 7, event: "tool_call.end", call_id: "call-1", arguments: {filename: "a.txt"}},
-      {seq: 8, event: "turn.end", status: "completed", stop_reason: "stop"},
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "message.start" },
+      { seq: 3, event: "tool_call.start", call_id: "call-1", name: "readFile" },
+      {
+        seq: 4,
+        event: "tool_call.arguments.delta",
+        call_id: "call-1",
+        delta: '{"filename":"a.txt"}',
+      },
+      { seq: 5, event: "tool_call.end", call_id: "call-1", arguments: { filename: "a.txt" } },
+      { seq: 6, event: "tool_call.start", call_id: "call-1", name: "readFile" },
+      { seq: 7, event: "tool_call.end", call_id: "call-1", arguments: { filename: "a.txt" } },
+      { seq: 8, event: "turn.end", status: "completed", stop_reason: "stop" },
     ]);
     let run = harness(server);
     await runHermesTurn({
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", clientTurnId: "chat-7-seq-5", inputText: "read it", tools: [tool(execute)],
-      signal: new AbortController().signal, hooks: run.hooks, fetch: run.fetch,
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-5",
+      inputText: "read it",
+      tools: [tool(execute)],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
     });
     expect(execute).toHaveBeenCalledOnce();
     expect(server.toolResults).toEqual([
-      {protocol_version: 1, result: "contents", is_error: false},
-      {protocol_version: 1, result: "contents", is_error: false},
+      { protocol_version: 1, result: "contents", is_error: false },
+      { protocol_version: 1, result: "contents", is_error: false },
     ]);
   });
 
-  it("uses graceful after_current_call control for Workshop pause conditions", async () => {
+  it("replays a crash-window side effect with the stable operation id without duplicating it", async () => {
+    let rows = new Map<string, HermesToolCallRecord>();
+    let records = {
+      get: (key: string) => rows.get(key),
+      put: (record: HermesToolCallRecord) => {
+        rows.set(hermesToolCallKey(record.turnId, record.callId), record);
+      },
+    };
+    let crashed = new HermesToolCallStateMachine(records);
+    await crashed.claim(7, "turn-1", "call-1", "createGadget");
+    let mutations = new Map<string, string>();
+    mutations.set("hermes:turn-1:call-1", "gadget-17");
+
+    let restarted = new HermesToolCallStateMachine(records);
+    let mutationCount = 1;
+    let sideEffectTool = {
+      name: "createGadget",
+      label: "Create gadget",
+      description: "Create one.",
+      parameters: Type.Object({}),
+      execute: async () => {
+        throw new Error("stock execution path must not be used");
+      },
+      executeHermes: async (
+        _callId: string,
+        _args: unknown,
+        _signal: AbortSignal | undefined,
+        _update: unknown,
+        operationId: string,
+      ) => {
+        let existing = mutations.get(operationId);
+        if (!existing) {
+          mutationCount++;
+          existing = "gadget-18";
+          mutations.set(operationId, existing);
+        }
+        return { content: [{ type: "text" as const, text: existing }], details: {} };
+      },
+    } as unknown as AgentTool;
     let server = new FakeHermesServer([
-      {seq: 1, event: "turn.started"},
-      {seq: 2, event: "message.start"},
-      {seq: 3, event: "tool_call.start", call_id: "call-1", name: "readFile"},
-      {seq: 4, event: "tool_call.end", call_id: "call-1", arguments: {filename: "a.txt"}},
-      {seq: 5, event: "turn.end", status: "paused", stop_reason: "connection_requested"},
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "tool_call.start", call_id: "call-1", name: "createGadget" },
+      { seq: 3, event: "tool_call.end", call_id: "call-1", arguments: {} },
+      { seq: 4, event: "turn.end", status: "completed", stop_reason: "stop" },
     ]);
-    let run = harness(server, {pauseReasonAfterTool: () => "connection_requested"});
-    await runHermesTurn({
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", clientTurnId: "chat-7-seq-6", inputText: "connect", tools: [tool(async () => ({
-        content: [{type: "text", text: "requested"}], details: {},
-      }))], signal: new AbortController().signal, hooks: run.hooks, fetch: run.fetch,
+    let run = harness(server, {
+      claimToolCall: (turnId, callId, name) => restarted.claim(7, turnId, callId, name),
+      resolveToolCall: (turnId, callId, result) => restarted.resolve(turnId, callId, result),
     });
-    expect(server.controls).toEqual([{
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "crash-replay",
+      inputText: "create",
+      tools: [sideEffectTool],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+    expect(mutationCount).toBe(1);
+    expect(server.toolResults[0]).toMatchObject({ result: "gadget-17", is_error: false });
+  });
+
+  it.each(["connection_requested", "awaiting_action_decision", "callbacks_complete"])(
+    "uses graceful after_current_call control for %s after a tool",
+    async (reason) => {
+      let server = new FakeHermesServer([
+        { seq: 1, event: "turn.started" },
+        { seq: 2, event: "message.start" },
+        { seq: 3, event: "tool_call.start", call_id: "call-1", name: "readFile" },
+        { seq: 4, event: "tool_call.end", call_id: "call-1", arguments: { filename: "a.txt" } },
+        { seq: 5, event: "turn.end", status: "completed", stop_reason: "connection_requested" },
+      ]);
+      let run = harness(server, { pauseReasonAfterTool: () => reason });
+      await runHermesTurn({
+        baseUrl: "https://hermes.test",
+        apiKey: "a".repeat(64),
+        workspaceId: "workspace-1",
+        chatId: "7",
+        clientTurnId: "chat-7-seq-6",
+        inputText: "connect",
+        tools: [
+          tool(async () => ({
+            content: [{ type: "text", text: "requested" }],
+            details: {},
+          })),
+        ],
+        signal: new AbortController().signal,
+        hooks: run.hooks,
+        fetch: run.fetch,
+      });
+      expect(server.controls).toEqual([
+        {
+          protocol_version: 1,
+          signal: "end_turn",
+          mode: "after_current_call",
+          reason,
+        },
+      ]);
+    },
+  );
+
+  it("ends a turn gracefully at the fifteen-minute wall-clock cap", async () => {
+    let server = new FakeHermesServer([]);
+    let encoder = new TextEncoder();
+    server.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      let request = new Request(input, init);
+      let url = new URL(request.url);
+      let body =
+        request.method === "POST" ? ((await request.json()) as Record<string, unknown>) : undefined;
+      server.requests.push({ url, method: request.method, body });
+      if (url.pathname.endsWith("/control")) {
+        server.controls.push(body!);
+        return Response.json({ ok: true });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  protocol_version: 1,
+                  turn_id: "turn-1",
+                  session_id: "session-1",
+                  seq: 1,
+                  event: "turn.started",
+                  timestamp: 1,
+                })}\n\n`,
+              ),
+            );
+            setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    protocol_version: 1,
+                    turn_id: "turn-1",
+                    session_id: "session-1",
+                    seq: 2,
+                    event: "turn.end",
+                    timestamp: 1,
+                    status: "completed",
+                    stop_reason: "turn_time_cap",
+                  })}\n\n`,
+                ),
+              );
+              controller.close();
+            }, 20);
+          },
+        }),
+      );
+    };
+    let run = harness(server);
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "time-cap",
+      inputText: "work",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: server.fetch,
+      turnTimeoutMs: 1,
+    });
+    expect(server.controls).toContainEqual({
       protocol_version: 1,
       signal: "end_turn",
       mode: "after_current_call",
-      reason: "connection_requested",
-    }]);
+      reason: "turn_time_cap",
+    });
   });
 
-  it("posts stable workspace deltas after session establishment and tolerates a 409", async () => {
+  it("posts first-session workspace deltas after turn.started and tolerates a 409", async () => {
     let server = new FakeHermesServer(terminalEvents());
     server.deltaStatus = 409;
     let run = harness(server);
     await runHermesTurn({
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", clientTurnId: "chat-7-seq-8", inputText: "reconcile", tools: [],
-      workspaceDeltas: [{deltaId: "chat-7-seq-4-revert", payload: {type: "revert"}}],
-      signal: new AbortController().signal, hooks: run.hooks, fetch: run.fetch,
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-8",
+      inputText: "reconcile",
+      tools: [],
+      workspaceDeltas: [{ deltaId: "chat-7-seq-4-revert", payload: { type: "revert" } }],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
     });
-    expect(server.deltas).toEqual([{
-      protocol_version: 1,
-      delta_id: "chat-7-seq-4-revert",
-      workspace_id: "workspace-1",
-      chat_id: "7",
-      payload: {type: "revert"},
-    }]);
-    expect(run.events.some(event => event.type === "turn_end")).toBe(true);
+    expect(server.deltas).toEqual([
+      {
+        protocol_version: 1,
+        delta_id: "chat-7-seq-4-revert",
+        workspace_id: "workspace-1",
+        chat_id: "7",
+        payload: { type: "revert" },
+      },
+    ]);
+    expect(run.events.some((event) => event.type === "turn_end")).toBe(true);
+  });
+
+  it("accepts established-session deltas before posting the dependent user turn", async () => {
+    let server = new FakeHermesServer(terminalEvents());
+    let run = harness(server);
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-10",
+      inputText: "what changed?",
+      tools: [],
+      sessionEstablished: true,
+      workspaceDeltas: [
+        { deltaId: "chat-7-seq-9-user-changes", payload: { type: "user_changes" } },
+      ],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+    expect(server.requests.map((request) => request.url.pathname)).toEqual([
+      "/api/workshop/v1/sessions/workspace-1/7/deltas",
+      "/api/workshop/v1/turns",
+    ]);
   });
 
   it("maps user cancellation to immediate abort control", async () => {
@@ -219,27 +540,70 @@ describe("Hermes remote driver", () => {
       },
     });
     await runHermesTurn({
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", clientTurnId: "chat-7-seq-9", inputText: "cancel", tools: [],
-      signal: controller.signal, hooks: run.hooks, fetch: run.fetch,
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-9",
+      inputText: "cancel",
+      tools: [],
+      signal: controller.signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
     });
-    expect(server.controls).toEqual([{
-      protocol_version: 1,
-      signal: "abort",
-      mode: "immediate",
-      reason: "user_cancelled",
-    }]);
+    expect(server.controls).toEqual([
+      {
+        protocol_version: 1,
+        signal: "abort",
+        mode: "immediate",
+        reason: "user_cancelled",
+      },
+    ]);
+  });
+
+  it("retries a failed abort control without leaking its response body", async () => {
+    let server = new FakeHermesServer(terminalEvents());
+    server.controlStatuses.push(500);
+    let controller = new AbortController();
+    let run = harness(server, {
+      onTurnStarted: () => {
+        controller.abort();
+      },
+    });
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "chat-7-seq-11",
+      inputText: "cancel",
+      tools: [],
+      signal: controller.signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+      sleep: async () => {},
+    });
+    expect(server.controls).toHaveLength(2);
   });
 
   it("reports an epoch change and converts provider error turns", async () => {
     let firstServer = new FakeHermesServer(terminalEvents(), [], "session-1");
-    let secondServer = new FakeHermesServer([
-      {seq: 1, event: "turn.started"},
-      {seq: 2, event: "message.start"},
-      {seq: 3, event: "error", code: "provider_error", message: "provider unavailable",
-       retryable: true},
-      {seq: 4, event: "turn.end", status: "failed", stop_reason: "error"},
-    ], [], "session-2");
+    let secondServer = new FakeHermesServer(
+      [
+        { seq: 1, event: "turn.started" },
+        { seq: 2, event: "message.start" },
+        {
+          seq: 3,
+          event: "error",
+          code: "provider_error",
+          message: "provider unavailable",
+          retryable: true,
+        },
+        { seq: 4, event: "turn.end", status: "error", stop_reason: "agent_error" },
+      ],
+      [],
+      "session-2",
+    );
     let run = harness(firstServer);
     let currentSession: string | undefined;
     let epochChanges = 0;
@@ -249,20 +613,96 @@ describe("Hermes remote driver", () => {
       currentSession = sessionId;
     };
     let common = {
-      baseUrl: "https://hermes.test", apiKey: "a".repeat(64), workspaceId: "workspace-1",
-      chatId: "7", inputText: "fail", tools: [], signal: new AbortController().signal,
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      inputText: "fail",
+      tools: [],
+      signal: new AbortController().signal,
       hooks: run.hooks,
     };
     await runHermesTurn({
-      ...common, clientTurnId: "chat-7-seq-6", fetch: firstServer.fetch,
+      ...common,
+      clientTurnId: "chat-7-seq-6",
+      fetch: firstServer.fetch,
     });
     await runHermesTurn({
-      ...common, clientTurnId: "chat-7-seq-7", fetch: secondServer.fetch,
+      ...common,
+      clientTurnId: "chat-7-seq-7",
+      fetch: secondServer.fetch,
     });
     expect(run.sessions).toEqual(["session-1", "session-2"]);
     expect(epochChanges).toBe(1);
-    expect(run.events.filter(event => event.type === "turn_end").at(-1)).toMatchObject({
-      message: {stopReason: "error", errorMessage: "provider unavailable"},
+    expect(run.events.filter((event) => event.type === "turn_end").at(-1)).toMatchObject({
+      message: { stopReason: "error", errorMessage: "provider unavailable" },
     });
+  });
+
+  it.each([
+    ["error", "agent_error", "error"],
+    ["aborted", "user_cancelled", "aborted"],
+    ["interrupted", "gateway_restart", "error"],
+  ])("maps terminal status %s independently of reason", async (status, reason, expected) => {
+    let server = new FakeHermesServer([
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "turn.end", status, stop_reason: reason },
+    ]);
+    let run = harness(server);
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: `status-${status}`,
+      inputText: "status",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+    expect(run.events.find((event) => event.type === "turn_end")).toMatchObject({
+      message: { stopReason: expected },
+    });
+  });
+
+  it("rejects a session epoch change inside one event stream", async () => {
+    let body = [
+      {
+        protocol_version: 1,
+        turn_id: "turn-1",
+        session_id: "session-1",
+        seq: 1,
+        event: "turn.started",
+        timestamp: 1,
+      },
+      {
+        protocol_version: 1,
+        turn_id: "turn-1",
+        session_id: "session-2",
+        seq: 2,
+        event: "turn.end",
+        timestamp: 1,
+        status: "completed",
+        stop_reason: "stop",
+      },
+    ]
+      .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+      .join("");
+    let run = harness(new FakeHermesServer([]));
+    await expect(
+      runHermesTurn({
+        baseUrl: "https://hermes.test",
+        apiKey: "a".repeat(64),
+        workspaceId: "workspace-1",
+        chatId: "7",
+        clientTurnId: "epoch-change",
+        inputText: "status",
+        tools: [],
+        signal: new AbortController().signal,
+        hooks: run.hooks,
+        fetch: async () => new Response(body),
+      }),
+    ).rejects.toThrow("changed session_id");
   });
 });

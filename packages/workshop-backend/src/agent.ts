@@ -20,7 +20,7 @@ import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./
 import type { ModelHandle } from "./ai-models";
 import { WORKSHOP_AGENT_TOOL_DEFINITIONS } from "./agent-tool-definitions";
 import {
-  hermesInputText, runHermesTurn, type HermesAttachedTurn, type HermesToolResult,
+  HermesHttpError, hermesInputText, runHermesTurn, type HermesAttachedTurn, type HermesToolResult,
   type HermesWorkspaceDelta,
 } from "./hermes-driver";
 import {
@@ -294,16 +294,22 @@ export interface AgentHooks {
   /** Wake-announced turn to attach on this run, if one was durably registered. */
   getHermesAttachedTurn(chatId: number): HermesAttachedTurn | undefined;
 
+  /** The established Hermes session epoch for this chat, if a prior turn has started. */
+  getHermesSessionId(chatId: number): string | undefined;
+
   /** Record Hermes's session epoch and clear turn-local projection state on an epoch change. */
   recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void;
+
+  /** Record that Hermes's terminal event crossed the shared event sink. */
+  recordHermesTerminal(chatId: number, turnId: string, sequence: number): void;
 
   /** Clear a wake attachment only after its terminal event crossed the persistence barrier. */
   completeHermesAttachedTurn(chatId: number, turnId: string): void;
 
-  /** Read/write the durable `(turn_id, call_id)` execution result cache. */
-  getHermesToolResult(turnId: string, callId: string): HermesToolResult | undefined;
-  putHermesToolResult(chatId: number, turnId: string, callId: string,
-                      result: HermesToolResult): void;
+  /** Durably claim and resolve a `(turn_id, call_id)` execution before/after local work. */
+  claimHermesToolCall(chatId: number, turnId: string, callId: string, toolName: string):
+      Promise<{execute: true} | {execute: false, result: HermesToolResult}>;
+  resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
 
   /** Whether a captured gatekeeper action requires approval before another model step. */
   hasCapturedActionAwaitingDecision(chatId: number): boolean;
@@ -325,8 +331,11 @@ export interface AgentHooks {
    * declaration rides the next turn flush (see flushAgentChanges).
    */
   appendAgentCodeChange(chatId: number, author: AiChatAuthorInfo, change: CodeChange,
-                        pin?: {gadgetId: WorkpieceId, baseCommit: string})
+                        pin?: {gadgetId: WorkpieceId, baseCommit: string}, operationId?: string)
       : Promise<{generation: number, revision: number}>;
+
+  /** Whether a Hermes-tagged code mutation already landed before a process restart. */
+  hasHermesCodeChange(chatId: number, operationId: string): boolean;
 
   /**
    * The turn flush: materialize the chat's unmaterialized change rows (this turn's appends, plus
@@ -398,8 +407,12 @@ export interface AgentHooks {
    * still pending in another chat). Returns the id and the (trimmed) title as created. `output`
    * is the format declared by the blueprint being instantiated, if any (see fetchBlueprint).
    */
-  createGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput)
+  createAgentGadget(title: string, bindingName: string, chatId: number, output?: BlueprintOutput,
+                    operationId?: string)
       : {id: WorkpieceId, title: string};
+
+  /** Find a provisional gadget already created by a replayed Hermes operation. */
+  findHermesCreatedGadget(operationId: string): {id: WorkpieceId, title: string} | undefined;
 
   /**
    * Describe a workpiece (a gadget or a gatekeeper) reachable as `envName` in the chat's env,
@@ -413,7 +426,8 @@ export interface AgentHooks {
    * to the chat. The caller is responsible for getting the addition recorded in the chat log (see
    * `addedBindings` on the "changes" message) so the pending edge gets sequence-stamped.
    */
-  addGadgetBinding(gadgetId: WorkpieceId, name: string, target: WorkpieceId, chatId: number): void;
+  addGadgetBinding(gadgetId: WorkpieceId, name: string, target: WorkpieceId, chatId: number,
+                   operationId?: string): void;
 
   /**
    * Prepare (seeding/naming lazily as needed) and return the chat's seed binding layer, including
@@ -1100,7 +1114,7 @@ export async function runAgent(
 
   // The model context reconstructed from the chat log.
   let modelMessages: Message[] = [];
-  let hermesWorkspaceDeltas: HermesWorkspaceDelta[] = [];
+  let hermesWorkspaceDeltas: HermesWorkspaceDelta[] | undefined = handle.hermes ? [] : undefined;
   // Records which chat message produced each model message, so compaction can convert a cut in the
   // prompt back to a durable chat sequence.
   let modelMessageSources: Omit<CompactionProjectionMessage, "message">[] = [];
@@ -1462,7 +1476,7 @@ export async function runAgent(
                           "the user later reverted the file to an earlier version.",
                       isError: true,
                     };
-                    hermesWorkspaceDeltas.push({
+                    hermesWorkspaceDeltas?.push({
                       deltaId: `chat-${chatId}-seq-${msg.sequence}-reverted-read-` +
                           hermesWorkspaceDeltas.length,
                       payload: {type: "stale_read", sequence: msg.sequence,
@@ -1501,7 +1515,7 @@ export async function runAgent(
                             "current content.",
                         isError: true,
                       };
-                      hermesWorkspaceDeltas.push({
+                      hermesWorkspaceDeltas?.push({
                         deltaId: `chat-${chatId}-seq-${msg.sequence}-stale-read-` +
                             hermesWorkspaceDeltas.length,
                         payload: {type: "stale_read", sequence: msg.sequence,
@@ -1750,7 +1764,7 @@ export async function runAgent(
                   "available; read the files to see their current content.)");
             }
             if (observations.length > 0) {
-              hermesWorkspaceDeltas.push({
+              hermesWorkspaceDeltas?.push({
                 deltaId: `chat-${chatId}-seq-${msg.sequence}-user-changes`,
                 payload: {
                   type: "user_changes",
@@ -1822,7 +1836,7 @@ export async function runAgent(
           arguments: {},
         }], handle.model, msgTimestamp));
         let revertedFromChangeId = changeIdMap.get(msg.revertFrom)!;
-        hermesWorkspaceDeltas.push({
+        hermesWorkspaceDeltas?.push({
           deltaId: `chat-${chatId}-seq-${msg.sequence}-revert`,
           payload: {
             type: "revert",
@@ -1993,6 +2007,8 @@ export async function runAgent(
   // needs (the error text, plus e.g. observedCodeVersion) here before rethrowing.
   // Success-path notes ride the tool result's `details` instead.
   let toolCallNotes = new Map<string, Partial<AiToolCall>>();
+  let hermesOperationIds = new Map<string, string>();
+  let hermesOperationId = (toolCallId: string) => hermesOperationIds.get(toolCallId);
 
   // Renders a thrown tool error exactly the way pi renders it into the live error tool result
   // (an Error contributes its message, anything else is stringified), so the persisted `error`
@@ -2034,9 +2050,10 @@ export async function runAgent(
   // the chat's code base at append time; its log declaration rides the next flush.
   let appendAgentEdit = async (
       workpieceId: WorkpieceId, change: CodeChange,
-      pin?: {baseCommit: string, baseFiles: Map<string, string>}) => {
+      pin?: {baseCommit: string, baseFiles: Map<string, string>}, operationId?: string) => {
     await hooks.appendAgentCodeChange(chatId, author, change,
-        pin !== undefined ? {gadgetId: workpieceId, baseCommit: pin.baseCommit} : undefined);
+        pin !== undefined ? {gadgetId: workpieceId, baseCommit: pin.baseCommit} : undefined,
+        operationId);
     if (pin !== undefined) {
       sessionContent = new Map(sessionContent);
       sessionContent.set(workpieceId, pin.baseFiles);
@@ -2347,6 +2364,11 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          let operationId = hermesOperationId(toolCallId);
+          if (operationId && hooks.hasHermesCodeChange(chatId, operationId)) {
+            markFileRead(resolved.workpieceId, filename);
+            return toolResult(jsonToolResultText({success: true, changeId: nextChangeId}));
+          }
 
           // The first write to an unpinned gadget with committed code pins it at the current
           // head (a whole-file overwrite is coherent against any base, so no read gate here).
@@ -2362,7 +2384,8 @@ export async function runAgent(
           // A whole-file write is a `set`: valid against any state, so replay and concurrent
           // transforms can never mis-anchor it.
           await appendAgentEdit(resolved.workpieceId,
-              {[resolved.workpieceId]: [[filename, {set: newContent}]]}, pin);
+              {[resolved.workpieceId]: [[filename, {set: newContent}]]}, pin,
+              operationId);
 
           // The agent knows exactly what's in the file, so add it to the `filesRead` set so
           // that it can make further edits without rewriting.
@@ -2387,6 +2410,11 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          let operationId = hermesOperationId(toolCallId);
+          if (operationId && hooks.hasHermesCodeChange(chatId, operationId)) {
+            markFileRead(resolved.workpieceId, filename);
+            return toolResult(jsonToolResultText({success: true, changeId: nextChangeId}));
+          }
           let readFiles = filesRead.get(resolved.workpieceId);
           if (readFiles === undefined || !readFiles.has(filename)) {
             throw new Error("You must read a file before you can edit it.");
@@ -2426,7 +2454,8 @@ export async function runAgent(
           if (replacement !== textToReplace) {
             let edit = replaceSpanChange(before.length, pos, textToReplace, replacement);
             await appendAgentEdit(
-                resolved.workpieceId, {[resolved.workpieceId]: [[filename, {edit}]]}, pin);
+                resolved.workpieceId, {[resolved.workpieceId]: [[filename, {edit}]]}, pin,
+                operationId);
             // Like writeFile: the agent knows the file's exact resulting content, so the entry
             // becomes session knowledge (the gadget is pinned now, so a commit stamp -- which
             // predates this edit -- would be the wrong thing to carry forward).
@@ -2530,7 +2559,8 @@ export async function runAgent(
           // then rides the *next* flush, whose "changes" message durably records and
           // sequence-stamps the pending edge (see addChatMessages in overseer.ts).
           flushPendingChanges();
-          hooks.addGadgetBinding(gadgetEntry.id, bindingName, sourceEntry.id, chatId);
+          hooks.addGadgetBinding(gadgetEntry.id, bindingName, sourceEntry.id, chatId,
+              hermesOperationId(toolCallId));
           pendingAddedBindings.push(
               {gadgetId: gadgetEntry.id, name: bindingName, target: sourceEntry.id});
 
@@ -2556,8 +2586,11 @@ export async function runAgent(
       label: "Create gadget",
       execute: async (toolCallId, {title, bindingName, blueprintId}) => {
         try {
+          let operationId = hermesOperationId(toolCallId);
+          let replayed = operationId === undefined
+            ? undefined : hooks.findHermesCreatedGadget(operationId);
           validateBindingName(bindingName);
-          if (isNameInScope(bindingName)) {
+          if (!replayed && isNameInScope(bindingName)) {
             throw new Error(`There is already a binding named "${bindingName}" in your env. ` +
                 `Choose a different name.`);
           }
@@ -2588,7 +2621,8 @@ export async function runAgent(
             emitStreamEvent({type: "toolCallOutputFormat", toolCallId, output: blueprint.output});
           }
 
-          let created = hooks.createGadget(title, bindingName, chatId, blueprint?.output);
+          let created = replayed ?? hooks.createAgentGadget(
+              title, bindingName, chatId, blueprint?.output, operationId);
           pendingCreatedGadgets.push({gadgetId: created.id, title: created.title, bindingName});
           chatBindings.set(bindingName, {type: "workpiece", id: created.id});
 
@@ -2607,7 +2641,8 @@ export async function runAgent(
             let fileChanges = Object.entries(blueprint.files)
                 .map(([filename, text]): [string, {set: string}] => [filename, {set: text}]);
             if (fileChanges.length > 0) {
-              await appendAgentEdit(created.id, {[created.id]: fileChanges});
+              await appendAgentEdit(created.id, {[created.id]: fileChanges}, undefined,
+                  operationId === undefined ? undefined : `${operationId}:blueprint`);
             }
             // (The files are deliberately NOT added to filesRead: unlike a writeFile, the agent
             // hasn't seen their contents, so it must read before editing.)
@@ -2758,6 +2793,26 @@ export async function runAgent(
       executeCode: tools.executeCode,
       ...(callbackInitiated ? {giveUp: tools.giveUp} : {}),
     };
+  }
+
+  if (handle.hermes) {
+    for (let tool of Object.values(tools)) {
+      let executable = tool as AgentTool & {
+        executeHermes?: AgentTool["execute"] extends (...args: infer A) => infer R
+          ? (...args: [...A, string]) => R : never;
+      };
+      let execute = tool.execute.bind(tool);
+      executable.executeHermes = (async (
+          toolCallId: string, args: unknown, signal: AbortSignal | undefined,
+          onUpdate: Parameters<AgentTool["execute"]>[3], operationId: string) => {
+        hermesOperationIds.set(toolCallId, operationId);
+        try {
+          return await execute(toolCallId, args, signal, onUpdate);
+        } finally {
+          hermesOperationIds.delete(toolCallId);
+        }
+      }) as unknown as typeof executable.executeHermes;
+    }
   }
 
   let toolList = Object.values(tools);
@@ -2967,36 +3022,52 @@ export async function runAgent(
       let newest = modelMessages[modelMessages.length - 1];
       let newestSequence = chatMessages[chatMessages.length - 1]?.sequence ?? 0;
       let attachedTurn = pendingHermesAttachment;
-      await runHermesTurn({
-        ...handle.hermes,
-        workspaceId: hooks.getWorkspaceId(),
-        chatId: `${chatId}`,
-        clientTurnId: `chat-${chatId}-seq-${newestSequence}`,
-        inputText: hermesInputText(newest),
-        tools: toolList,
-        signal: abortSignal,
-        attachedTurn,
-        workspaceDeltas: hermesWorkspaceDeltas,
-        hooks: {
-          emit,
-          getToolResult: (turnId, callId) => hooks.getHermesToolResult(turnId, callId),
-          putToolResult: (turnId, callId, result) =>
-            hooks.putHermesToolResult(chatId, turnId, callId, result),
-          onTurnStarted: (turnId, sessionId) =>
-            hooks.recordHermesTurnStarted(chatId, turnId, sessionId),
-          pauseReasonAfterMessage: () => ++turnCount >= 30
-            ? "turn_cap"
-            : callbackInitiated && !attachedTurn && hooks.activeAgentCallbackCount(chatId) === 0
-            ? "callbacks_complete"
-            : undefined,
-          pauseReasonAfterTool: () => connectionRequested
-            ? "connection_requested"
-            : hooks.hasCapturedActionAwaitingDecision(chatId)
-            ? "awaiting_action_decision"
-            : undefined,
-        },
-      });
-      if (attachedTurn) hooks.completeHermesAttachedTurn(chatId, attachedTurn.turnId);
+      try {
+        await runHermesTurn({
+          ...handle.hermes,
+          workspaceId: hooks.getWorkspaceId(),
+          chatId: `${chatId}`,
+          clientTurnId: `chat-${chatId}-seq-${newestSequence}`,
+          inputText: hermesInputText(newest),
+          tools: toolList,
+          signal: abortSignal,
+          attachedTurn,
+          sessionEstablished: hooks.getHermesSessionId(chatId) !== undefined,
+          workspaceDeltas: hermesWorkspaceDeltas,
+          hooks: {
+            emit,
+            claimToolCall: (turnId, callId, toolName) =>
+              hooks.claimHermesToolCall(chatId, turnId, callId, toolName),
+            resolveToolCall: (turnId, callId, result) =>
+              hooks.resolveHermesToolCall(turnId, callId, result),
+            onTurnStarted: (turnId, sessionId) =>
+              hooks.recordHermesTurnStarted(chatId, turnId, sessionId),
+            onTerminalProjected: attachedTurn
+              ? (turnId, sequence) => {
+                  hooks.recordHermesTerminal(chatId, turnId, sequence);
+                  if (!turnFailure) hooks.completeHermesAttachedTurn(chatId, turnId);
+                }
+              : undefined,
+            pauseReasonAfterMessage: () => ++turnCount >= 30
+              ? "turn_cap"
+              : callbackInitiated && !attachedTurn && hooks.activeAgentCallbackCount(chatId) === 0
+              ? "callbacks_complete"
+              : undefined,
+            pauseReasonAfterTool: () => connectionRequested
+              ? "connection_requested"
+              : hooks.hasCapturedActionAwaitingDecision(chatId)
+              ? "awaiting_action_decision"
+              : callbackInitiated && hooks.activeAgentCallbackCount(chatId) === 0
+              ? "callbacks_complete"
+              : undefined,
+          },
+        });
+      } catch (error) {
+        if (error instanceof HermesHttpError) {
+          throw new AgentTurnError(error.message, error.status);
+        }
+        throw error;
+      }
     } else await runAgentLoopContinue(context, {
       model: handle.model,
       // Replay already produces LLM-shaped messages; no custom message types exist.

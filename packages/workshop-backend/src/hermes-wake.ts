@@ -55,6 +55,12 @@ export async function handleHermesWake(req: Request, env: Cloudflare.Env,
     }
     let eventsUrl = new URL(body.events_url);
     let hermesBase = new URL(env.HERMES_BASE_URL);
+    let insecureLoopback = hermesBase.protocol === "http:" &&
+        env.HERMES_ALLOW_INSECURE_LOOPBACK === "true" &&
+        ["localhost", "127.0.0.1", "[::1]"].includes(hermesBase.hostname);
+    if (hermesBase.protocol !== "https:" && !insecureLoopback) {
+      throw new Error("HERMES_BASE_URL must use HTTPS.");
+    }
     let expectedPath = `/api/workshop/v1/turns/${encodeURIComponent(turnId)}/events`;
     if (eventsUrl.origin !== hermesBase.origin || eventsUrl.pathname !== expectedPath ||
         eventsUrl.username || eventsUrl.password) {

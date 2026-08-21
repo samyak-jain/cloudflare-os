@@ -89,6 +89,19 @@ describe("getModel AI Gateway routing", () => {
     expect(handle.aiGatewayLogRoute).toBeUndefined();
   });
 
+  it("rejects cleartext Hermes except explicit loopback development", () => {
+    let config = {provider: "hermes" as const, model: "hermes", apiToken: ""};
+    expect(() => getModel(env({
+      HERMES_BASE_URL: "http://hermes.internal",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), config, INITIATOR)).toThrow("must use HTTPS");
+    expect(getModel(env({
+      HERMES_BASE_URL: "http://127.0.0.1:8788",
+      HERMES_ALLOW_INSECURE_LOOPBACK: "true",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), config, INITIATOR).hermes?.baseUrl).toBe("http://127.0.0.1:8788");
+  });
+
   it("routes non-Workers providers through the platform gateway", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },

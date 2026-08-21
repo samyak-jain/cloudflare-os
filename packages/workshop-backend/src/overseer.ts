@@ -11,6 +11,13 @@ import {
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
 import type { HermesAttachedTurn, HermesToolResult } from "./hermes-driver";
+import {
+  HermesToolCallStateMachine, hermesToolCallKey, type HermesToolCallRecord,
+} from "./hermes-tool-state";
+import {
+  HermesWakeQueue, type HermesWakeRecord, type HermesWakeRegistration,
+} from "./hermes-wake-queue";
+export type { HermesWakeRegistration } from "./hermes-wake-queue";
 import { GitStore, commitIdentityForAuthor, filesEqual, gitObjectsCollection, threeWayMerge }
   from "./git-store";
 import { migrateCodeLogToGit } from "./git-migration";
@@ -300,6 +307,7 @@ function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | unde
 // GadgetRecord.bindings keyed by binding name.
 type BindingRecord = {
   target: WorkpieceId;
+  hermesOperationId?: string;
 
   // User-provided metadata for how this binding should appear in blueprints. Absence means not
   // yet configured. This lives on the edge, not on the gatekeeper: two gadgets binding the same
@@ -359,6 +367,7 @@ type GadgetRecord = {
   // This gadget's bindings: binding name (as it appears in the gadget worker's `env`) -> binding
   // edge. Expected to stay small, so it's a map on the record rather than a separate collection.
   bindings: Record<string, BindingRecord>;
+  hermesOperationId?: string;
 
   // Present while the gadget is provisional: it was created within the given chat and follows
   // that chat's accept/reject lifecycle exactly like code changes (see mergeChanges() /
@@ -636,6 +645,7 @@ export type ChatChangeRecord = {
   timestamp: Date;
   author: AiChatAuthorInfo;
   change: CodeChange;
+  hermesOperationId?: string;
 
   /** The submission echo for user rows (see AiChatSubscriber.changeApplied); absent otherwise. */
   submission?: {clientId: string, seq: number};
@@ -804,31 +814,12 @@ type HermesChatRecord = {
   chatId: number;
   sessionId?: string;
   currentTurnId?: string;
-  attachedTurn?: HermesAttachedTurn;
+  terminalTurnId?: string;
+  terminalSequence?: number;
   modelId: string;
   initiatorUserId: string;
   initiator: AiChatAuthorInfo;
 };
-
-/** Authenticated autonomous Hermes turn registration, keyed by producer idempotency key. */
-export type HermesWakeRegistration = {
-  workspaceId: string;
-  chatId: number;
-  sessionId: string;
-  turnId: string;
-  eventsUrl: string;
-  idempotencyKey: string;
-};
-
-type HermesToolResultRecord = HermesToolResult & {
-  chatId: number;
-  turnId: string;
-  callId: string;
-};
-
-function hermesToolResultKey(turnId: string, callId: string): string {
-  return `${turnId.length}:${turnId}${callId}`;
-}
 
 // One agent step's model-facing snapshot (see StoredAssistantMessage in agent.ts), keyed by the
 // chatId.sequence of the step's "message" record.
@@ -1154,15 +1145,15 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: "chatId",
       }),
 
-      hermesWakes: collection<HermesWakeRegistration>()({
+      hermesWakes: collection<HermesWakeRecord>()({
         primaryKey: "idempotencyKey",
       }),
 
       // Exactly one durable local execution result for each remote turn/call identity.
-      hermesToolResults: collection<HermesToolResultRecord>()({
-        primaryKey: record => hermesToolResultKey(record.turnId, record.callId),
+      hermesToolResults: collection<HermesToolCallRecord>()({
+        primaryKey: record => hermesToolCallKey(record.turnId, record.callId),
         nonUniqueIndexes: {
-          byChatId(record: HermesToolResultRecord) { return record.chatId; },
+          byChatId(record: HermesToolCallRecord) { return record.chatId; },
         },
       }),
 
@@ -1397,6 +1388,8 @@ export function sanitizeMessageFormatRefs(
 }
 
 class OverseerImpl implements AgentHooks {
+  #hermesToolCalls: HermesToolCallStateMachine;
+  #hermesWakeQueue: HermesWakeQueue;
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
 
@@ -1619,6 +1612,11 @@ class OverseerImpl implements AgentHooks {
   #updateExternalMessageResponseDeliveryAlarm(): void {
     if (this.#runningAgents.size > 0) return;
 
+    if ([...this.storage.hermesWakes.list()].some(record => record.state !== "terminal")) {
+      this.ctx.storage.setAlarm(Date.now());
+      return;
+    }
+
     // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
     // Recompute from storage whenever the alarm may have been overwritten by another concern.
     this.#sweepDeliveredExternalMessageResponses();
@@ -1704,6 +1702,8 @@ class OverseerImpl implements AgentHooks {
   constructor(public ctx: DurableObjectState, public env: Cloudflare.Env) {
     this.logger = logger.with({ gadgetId: ctx.id.toString() });
     this.storage = makeOverseerStorage(ctx.storage);
+    this.#hermesToolCalls = new HermesToolCallStateMachine(this.storage.hermesToolResults);
+    this.#hermesWakeQueue = new HermesWakeQueue(this.storage.hermesWakes);
     this.gitStore = new GitStore(this.storage.gitObjects);
     this.users = this.ctx.exports.UserDurableObject;
     this.ownerId = this.storage.ownerId.get();
@@ -1745,9 +1745,13 @@ class OverseerImpl implements AgentHooks {
       // to do -- blockConcurrencyWhile has already aborted the DO -- but the rejection must be
       // consumed so it doesn't also surface as an unhandled rejection.
       this.ctx.blockConcurrencyWhile(() => this.#migrateToGitStorage())
-          .then(() => this.#resumeInterruptedAgents(), () => {});
+          .then(() => {
+            this.#resumeInterruptedAgents();
+            this.ctx.waitUntil(this.resumeHermesWakes());
+          }, () => {});
     } else {
       this.#resumeInterruptedAgents();
+      this.ctx.waitUntil(this.resumeHermesWakes());
     }
   }
 
@@ -2018,7 +2022,13 @@ class OverseerImpl implements AgentHooks {
   // gadget is born with a head (see GadgetRecord.commitId). `output` is the format declared by
   // the blueprint being instantiated, if any.
   createGadget(title: string, bindingName: string, chatId?: number,
-               output?: BlueprintOutput, initialCommitId?: string): GadgetRecord {
+               output?: BlueprintOutput, initialCommitId?: string,
+               hermesOperationId?: string): GadgetRecord {
+    if (hermesOperationId !== undefined) {
+      let replayed = [...this.storage.gadgets.list()]
+          .find(gadget => gadget.hermesOperationId === hermesOperationId);
+      if (replayed) return replayed;
+    }
     title = title.trim();
     if (!title) {
       throw new Error("A gadget requires a non-empty title.");
@@ -2041,6 +2051,7 @@ class OverseerImpl implements AgentHooks {
       created: new Date(),
       bindingName,
       bindings: {},
+      ...(hermesOperationId !== undefined ? {hermesOperationId} : {}),
     };
     if (output) {
       record.output = output;
@@ -2060,6 +2071,17 @@ class OverseerImpl implements AgentHooks {
   // The gadgets still provisional to the given chat, in id order.
   listPendingGadgets(chatId: number): GadgetRecord[] {
     return [...this.storage.gadgets.list()].filter(g => g.pending?.chatId === chatId);
+  }
+
+  findHermesCreatedGadget(operationId: string): {id: WorkpieceId, title: string} | undefined {
+    let gadget = [...this.storage.gadgets.list()]
+        .find(candidate => candidate.hermesOperationId === operationId);
+    return gadget && {id: gadget.id, title: gadget.title};
+  }
+
+  createAgentGadget(title: string, bindingName: string, chatId: number,
+                    output?: BlueprintOutput, operationId?: string): GadgetRecord {
+    return this.createGadget(title, bindingName, chatId, output, undefined, operationId);
   }
 
   // Reap crash-orphaned provisional gadgets and binding edges for the given chat. A pending
@@ -2223,7 +2245,7 @@ class OverseerImpl implements AgentHooks {
   // responsible for getting the addition recorded in the chat log so the pending edge gets
   // sequence-stamped (see addChatMessages()).
   bindWorkpiece(gadgetId: WorkpieceId, name: string, target: WorkpieceId,
-                chatId?: number): void {
+                chatId?: number, hermesOperationId?: string): void {
     validateBindingName(name);
     if (name === "GADGET") {
       throw new Error("The binding name `GADGET` is reserved.");
@@ -2231,6 +2253,8 @@ class OverseerImpl implements AgentHooks {
     let gadget = this.getGadgetRecord(gadgetId);
     let existing = gadget.bindings[name];
     if (existing) {
+      if (hermesOperationId !== undefined && existing.hermesOperationId === hermesOperationId &&
+          existing.target === target) return;
       // A pending edge is invisible to other chats for reads but still occupies its name for
       // writes: allowing a second proposal under the same name would mean accepting both
       // silently overwrites one with the other.
@@ -2246,7 +2270,11 @@ class OverseerImpl implements AgentHooks {
       }
       throw new Error(`No such gatekeeper: ${target}`);
     }
-    gadget.bindings[name] = {target, ...(chatId !== undefined ? {pending: {chatId}} : {})};
+    gadget.bindings[name] = {
+      target,
+      ...(chatId !== undefined ? {pending: {chatId}} : {}),
+      ...(hermesOperationId !== undefined ? {hermesOperationId} : {}),
+    };
     this.storage.gadgets.put(gadget);
 
     // The gadget's env changed, so its code must reload.
@@ -2588,7 +2616,8 @@ class OverseerImpl implements AgentHooks {
   #appendChatChangeRow(chatId: number, meta: AiChatMetadata, author: AiChatAuthorInfo,
                        change: CodeChange, source: ChatChangeRecord["source"],
                        newPins: ChatGadgetPinState[], contentAfter: CodeContent | undefined,
-                       submission?: {clientId: string, seq: number}): ChatChangeRecord {
+                       submission?: {clientId: string, seq: number},
+                       hermesOperationId?: string): ChatChangeRecord {
     let codeBase = this.chatCodeBase(meta);
     codeBase.pins.push(...newPins);
     let revision = codeBase.revision + 1;
@@ -2603,6 +2632,7 @@ class OverseerImpl implements AgentHooks {
       author,
       change,
       ...(submission !== undefined ? {submission} : {}),
+      ...(hermesOperationId !== undefined ? {hermesOperationId} : {}),
       source,
     };
     this.storage.chatChanges.put(row);
@@ -2958,8 +2988,14 @@ class OverseerImpl implements AgentHooks {
   // row -- head movement after the append merely leaves the chat stale for the accept gate to
   // catch, never retroactively fails the turn.
   async appendAgentCodeChange(chatId: number, author: AiChatAuthorInfo, change: CodeChange,
-                              pin?: {gadgetId: WorkpieceId, baseCommit: string})
+                              pin?: {gadgetId: WorkpieceId, baseCommit: string},
+                              operationId?: string)
       : Promise<{generation: number, revision: number}> {
+    if (operationId !== undefined) {
+      let existing = [...this.storage.chatChanges.list({prefix: `${keyString(chatId)}.`})]
+          .find(row => row.hermesOperationId === operationId);
+      if (existing) return {generation: existing.generation, revision: existing.revision};
+    }
     let meta = this.getChatMetaOrThrow(chatId);
     validateCodeChangeSchema(change);
 
@@ -3001,8 +3037,13 @@ class OverseerImpl implements AgentHooks {
 
     validateCodeChangeContent(change, content);
     let row = this.#appendChatChangeRow(chatId, fresh, author, change, "agent", newPins,
-                                        applyCodeChange(content, change));
+                                        applyCodeChange(content, change), undefined, operationId);
     return {generation: row.generation, revision: row.revision};
+  }
+
+  hasHermesCodeChange(chatId: number, operationId: string): boolean {
+    return [...this.storage.chatChanges.list({prefix: `${keyString(chatId)}.`})]
+        .some(row => row.hermesOperationId === operationId);
   }
 
   // The (user, clientId, seq) dedupe step of submitCodeChange: returns the recorded landing spot
@@ -5541,14 +5582,14 @@ class OverseerImpl implements AgentHooks {
   // provisional to the chat (see BindingRecord.pending); the agent loop records the addition in
   // the chat log via `addedBindings`, which sequence-stamps it (see addChatMessages()).
   addGadgetBinding(gadgetId: WorkpieceId, name: string, target: WorkpieceId,
-                   chatId: number): void {
+                   chatId: number, operationId?: string): void {
     if (!this.storage.gatekeepers.get(target)) {
       throw new Error("This resource is no longer available.");
     }
     // Validate the gadget exists and is visible to this chat.
     let gadget = this.getGadgetRecord(
         this.resolveWorkpieceRoot(gadgetId, true, chatId).workpieceId);
-    this.bindWorkpiece(gadget.id, name, target, chatId);
+    this.bindWorkpiece(gadget.id, name, target, chatId, operationId);
   }
 
   // Returns the checkpoint named by `chatMeta.compactedTo`.
@@ -5650,8 +5691,9 @@ class OverseerImpl implements AgentHooks {
       this.storage.hermesChats.put({
         chatId,
         sessionId: previous?.sessionId,
-        currentTurnId: previous?.attachedTurn?.turnId ?? previous?.currentTurnId,
-        attachedTurn: previous?.attachedTurn,
+        currentTurnId: previous?.currentTurnId,
+        terminalTurnId: previous?.terminalTurnId,
+        terminalSequence: previous?.terminalSequence,
         modelId: aiModel.profile.id,
         initiatorUserId,
         initiator,
@@ -5863,6 +5905,7 @@ class OverseerImpl implements AgentHooks {
       });
 
       this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      if (aiModel.config.provider === "hermes") this.#completeTerminalHermesWake(chatId);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);
@@ -5910,10 +5953,8 @@ class OverseerImpl implements AgentHooks {
       liveChat.activeAgentCallbacks.clear();
 
       // If any new messages were queued waiting for the agent to finish, deliver them now.
-      let hermesWake = this.storage.hermesChats.get(chatId);
-      if (hermesWake?.attachedTurn &&
-          hermesWake.currentTurnId !== hermesWake.attachedTurn.turnId && meta) {
-        await this.#startRegisteredHermesWake(hermesWake);
+      if (meta && this.#pendingHermesWake(chatId)) {
+        await this.#startNextHermesWake(chatId);
       } else if (liveChat.pendingAgentCallbacks.length > 0) {
         this.#startAgentForCallbacks(meta, liveChat);
       } else {
@@ -6123,52 +6164,63 @@ class OverseerImpl implements AgentHooks {
   }
 
   getHermesAttachedTurn(chatId: number): HermesAttachedTurn | undefined {
-    return this.storage.hermesChats.get(chatId)?.attachedTurn;
+    let wake = this.#hermesWakeRecords(chatId).find(record => record.state === "running");
+    return wake && {
+      turnId: wake.turnId,
+      sessionId: wake.sessionId,
+      eventsUrl: wake.eventsUrl,
+      idempotencyKey: wake.idempotencyKey,
+    };
+  }
+
+  getHermesSessionId(chatId: number): string | undefined {
+    return this.storage.hermesChats.get(chatId)?.sessionId;
   }
 
   async acceptHermesWake(wake: HermesWakeRegistration): Promise<void> {
     if (wake.workspaceId !== this.ctx.id.toString()) {
       throw new Error("Hermes wake workspace does not match this Durable Object.");
     }
-    let previousWake = this.storage.hermesWakes.get(wake.idempotencyKey);
-    if (previousWake) {
-      if (JSON.stringify(previousWake) !== JSON.stringify(wake)) {
-        throw new Error("Hermes wake idempotency key was reused with a different payload.");
-      }
-      let previousState = this.storage.hermesChats.get(wake.chatId);
-      let previousMeta = this.storage.chatMeta.get(wake.chatId);
-      if (previousState?.attachedTurn && previousMeta && !previousMeta.activeAgent &&
-          !this.isPreparingChatMessage(wake.chatId)) {
-        await this.#startRegisteredHermesWake(previousState);
-      }
-      return;
-    }
     let state = this.storage.hermesChats.get(wake.chatId);
     if (!state) throw new Error("Hermes has no established session for this chat.");
     let meta = this.storage.chatMeta.get(wake.chatId);
     if (!meta) throw new Error("Hermes wake names a deleted chat.");
 
+    let registration: {record: HermesWakeRecord, created: boolean} | undefined;
     this.ctx.storage.transactionSync(() => {
-      if (state.sessionId && state.sessionId !== wake.sessionId) {
+      registration = this.#hermesWakeQueue.register(wake, Date.now());
+      if (registration.created && state.sessionId && state.sessionId !== wake.sessionId) {
         this.storage.hermesToolResults.byChatId.delete(wake.chatId);
       }
-      state.sessionId = wake.sessionId;
-      state.attachedTurn = {
-        turnId: wake.turnId,
-        sessionId: wake.sessionId,
-        eventsUrl: wake.eventsUrl,
-      };
-      this.storage.hermesChats.put(state);
-      this.storage.hermesWakes.put(wake);
+      if (registration.created) {
+        state.sessionId = wake.sessionId;
+        this.storage.hermesChats.put(state);
+        this.ctx.storage.setAlarm(Date.now() + 1000);
+      }
     });
+    if (!registration) throw new Error("Hermes wake registration transaction did not run.");
+    if (registration.record.state === "terminal") return;
 
     // Registration above is the acknowledgement barrier. If another turn is still unwinding, its
     // finally block observes attachedTurn and starts this one after it clears activeAgent.
     if (meta.activeAgent || this.isPreparingChatMessage(wake.chatId)) return;
-    await this.#startRegisteredHermesWake(state);
+    await this.#startNextHermesWake(wake.chatId);
   }
 
-  async #startRegisteredHermesWake(state: HermesChatRecord): Promise<void> {
+  #hermesWakeRecords(chatId: number): HermesWakeRecord[] {
+    return this.#hermesWakeQueue.list(chatId);
+  }
+
+  #pendingHermesWake(chatId: number): HermesWakeRecord | undefined {
+    return this.#hermesWakeRecords(chatId)
+        .find(record => record.state === "running" || record.state === "queued");
+  }
+
+  async #startNextHermesWake(chatId: number): Promise<void> {
+    let wake = this.#hermesWakeQueue.dequeue(chatId);
+    if (!wake) return;
+    let state = this.storage.hermesChats.get(chatId);
+    if (!state) throw new Error("Hermes chat state disappeared before wake dequeue.");
     let user = this.users.get(this.users.idFromString(state.initiatorUserId));
     let context = await user.getChatContext(state.modelId);
     if (!context.aiModel || context.aiModel.config.provider !== "hermes") {
@@ -6183,6 +6235,17 @@ class OverseerImpl implements AgentHooks {
                     /* callbackInitiated */ true, /* keepAlive */ true);
   }
 
+  async resumeHermesWakes(): Promise<void> {
+    let chatIds = new Set([...this.storage.hermesWakes.list()]
+        .filter(record => record.state !== "terminal").map(record => record.chatId));
+    for (let chatId of chatIds) {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta && !meta.activeAgent && !this.isPreparingChatMessage(chatId)) {
+        await this.#startNextHermesWake(chatId);
+      }
+    }
+  }
+
   recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void {
     let record = this.storage.hermesChats.get(chatId);
     if (!record) throw new Error("Hermes chat state was not registered before turn start.");
@@ -6194,29 +6257,35 @@ class OverseerImpl implements AgentHooks {
     }
     record.sessionId = sessionId;
     record.currentTurnId = turnId;
+    delete record.terminalTurnId;
+    delete record.terminalSequence;
     this.storage.hermesChats.put(record);
+  }
+
+  recordHermesTerminal(chatId: number, turnId: string, sequence: number): void {
+    let record = this.storage.hermesChats.get(chatId);
+    if (!record || record.currentTurnId !== turnId) return;
+    record.terminalTurnId = turnId;
+    record.terminalSequence = sequence;
+    this.storage.hermesChats.put(record);
+  }
+
+  #completeTerminalHermesWake(chatId: number): void {
+    let record = this.storage.hermesChats.get(chatId);
+    if (record?.terminalTurnId) this.completeHermesAttachedTurn(chatId, record.terminalTurnId);
   }
 
   completeHermesAttachedTurn(chatId: number, turnId: string): void {
-    let record = this.storage.hermesChats.get(chatId);
-    if (record?.attachedTurn?.turnId !== turnId) return;
-    delete record.attachedTurn;
-    this.storage.hermesChats.put(record);
+    this.#hermesWakeQueue.complete(chatId, turnId);
   }
 
-  getHermesToolResult(turnId: string, callId: string): HermesToolResult | undefined {
-    let record = this.storage.hermesToolResults.get(hermesToolResultKey(turnId, callId));
-    if (!record) return undefined;
-    let {chatId: _chatId, turnId: _turnId, callId: _callId, ...result} = record;
-    return result;
+  async claimHermesToolCall(chatId: number, turnId: string, callId: string, toolName: string):
+      Promise<{execute: true} | {execute: false, result: HermesToolResult}> {
+    return this.#hermesToolCalls.claim(chatId, turnId, callId, toolName);
   }
 
-  putHermesToolResult(chatId: number, turnId: string, callId: string,
-                      result: HermesToolResult): void {
-    let key = hermesToolResultKey(turnId, callId);
-    let previous = this.storage.hermesToolResults.get(key);
-    if (previous) return;
-    this.storage.hermesToolResults.put({chatId, turnId, callId, ...result});
+  resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void {
+    this.#hermesToolCalls.resolve(turnId, callId, result);
   }
 
   hasCapturedActionAwaitingDecision(chatId: number): boolean {
@@ -8304,7 +8373,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    *   the agents yet again.
    */
   async alarm() {
+    await this.impl.resumeHermesWakes();
     await this.impl.waitForAllAgentsToComplete();
+    await this.impl.resumeHermesWakes();
     await this.impl.deliverReadyExternalMessageResponses();
   }
 
@@ -10221,6 +10292,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     this.impl.storage.chatMeta.delete(chatId);
     this.impl.storage.chatContext.delete(chatId);
+    this.impl.storage.hermesChats.delete(chatId);
+    this.impl.storage.hermesToolResults.byChatId.delete(chatId);
+    for (let wake of [...this.impl.storage.hermesWakes.list()]
+        .filter(record => record.chatId === chatId)) {
+      this.impl.storage.hermesWakes.delete(wake.idempotencyKey);
+    }
     // Buffer the keys first: deleting invalidates the list cursor.
     let checkpoints = Array.from(
         this.impl.storage.chatCompactions.list({prefix: `${keyString(chatId)}.`}),

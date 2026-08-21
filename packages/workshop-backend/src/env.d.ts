@@ -29,6 +29,7 @@ declare global {
       HERMES_BASE_URL?: string;
       WORKSHOP_API_KEY?: string;
       WORKSHOP_WAKE_TOKEN?: string;
+      HERMES_ALLOW_INSECURE_LOOPBACK?: string;
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup

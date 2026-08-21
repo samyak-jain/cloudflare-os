@@ -530,9 +530,13 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string,
         throw new Error("WORKSHOP_API_KEY must contain at least 64 hexadecimal characters.");
       }
       let parsedBase = new URL(baseUrl);
-      if (!["https:", "http:"].includes(parsedBase.protocol) ||
+      let insecureLoopback = parsedBase.protocol === "http:" &&
+          env?.HERMES_ALLOW_INSECURE_LOOPBACK === "true" &&
+          ["localhost", "127.0.0.1", "[::1]"].includes(parsedBase.hostname);
+      if ((parsedBase.protocol !== "https:" && !insecureLoopback) ||
           parsedBase.username || parsedBase.password) {
-        throw new Error("HERMES_BASE_URL must be an HTTP(S) URL without embedded credentials.");
+        throw new Error("HERMES_BASE_URL must use HTTPS. Local development may explicitly set " +
+            "HERMES_ALLOW_INSECURE_LOOPBACK=true for a loopback HTTP URL.");
       }
       return {
         model: {
