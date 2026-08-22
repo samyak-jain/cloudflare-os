@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lena — chibi avatar contact sheet</title>
+<style>
+  :root{
+    --ink:#211c2e; --dim:#6d6480; --line:#ddd6ea; --paper:#f7f5fb; --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:32px 36px 60px; background:var(--paper); color:var(--ink);
+    font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    width:1360px;
+  }
+  h1{font-size:22px;letter-spacing:-.01em;margin:0 0 2px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);
+     margin:34px 0 14px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+  .sub{color:var(--dim);margin:0 0 6px}
+  .row{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-end}
+  .cell{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;
+        display:flex;flex-direction:column;align-items:center;gap:8px}
+  .cap{font-size:11px;color:var(--dim);letter-spacing:.02em;text-align:center;max-width:150px}
+  .circle{border-radius:50%;overflow:hidden;border:1px solid var(--line);display:block;
+          box-shadow:0 1px 3px rgba(40,30,60,.10)}
+  .grid{display:grid;grid-template-columns:repeat(6,1fr);gap:14px}
+  .swatches{display:flex;flex-wrap:wrap;gap:10px}
+  .sw{width:104px}
+  .chip{height:44px;border-radius:8px;border:1px solid rgba(0,0,0,.10)}
+  .swname{font-size:10px;color:var(--dim);margin-top:4px}
+  .swhex{font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .dark{background:#1a1626}
+  .dark .cap{color:#9c93b0}
+  figure{margin:0}
+</style>
+</head>
+<body>
+
+<h1>Lena — chibi avatar</h1>
+<p class="sub">512&times;512 rig-ready SVG · contact sheet &amp; rig-state grid</p>
+
+<h2>Master &amp; face</h2>
+<div class="row">
+  <div class="cell"><div id="master"></div><div class="cap">512 master</div></div>
+  <div class="cell"><div id="facezoom"></div><div class="cap">face zoom (2&times;, viewBox 130 80 / 252 260)</div></div>
+  <div class="cell"><div id="ahogezoom"></div><div class="cap">ahoge zoom</div></div>
+</div>
+
+<h2>Circle crops</h2>
+<div class="row" id="circles"></div>
+
+<h2>Circle crops on dark</h2>
+<div class="row dark" id="circlesdark" style="background:#1a1626;padding:16px;border-radius:12px"></div>
+
+<h2>Rig states</h2>
+<div class="grid" id="rig"></div>
+
+<h2>Palette tokens (sampled from reference)</h2>
+<div class="swatches" id="palette"></div>
+
+<script>
+const SRC = 'lena.svg';
+let DOC = null;
+
+function svgAt(size, viewBox){
+  const s = DOC.cloneNode(true);
+  s.setAttribute('width', size); s.setAttribute('height', size);
+  if (viewBox) s.setAttribute('viewBox', viewBox);
+  s.removeAttribute('id');
+  return s;
+}
+
+/* ---- rig helpers -------------------------------------------------- */
+function set(root, id, attr, val){
+  const el = root.getElementById ? root.getElementById(id) : root.querySelector('#'+id);
+  if (!el) { console.warn('missing id', id); return; }
+  el.setAttribute(attr, val);
+}
+function show(root, id){
+  ['closed','half','open','smile','frown'].forEach(m=>{
+    const el = root.querySelector('#lena-mouth-'+m);
+    if (el) el.setAttribute('display', m===id ? 'inline' : 'none');
+  });
+}
+function tf(root, id, t){
+  const el = root.querySelector('#'+id);
+  if (!el) { console.warn('missing id', id); return; }
+  el.setAttribute('transform', t);
+}
+
+const HEAD_ORIGIN = '256 380';      // neck pivot
+const BLINK = 56;                   // full-close translation for the upper lid
+
+const STATES = [
+  ['neutral',            r=>{}],
+  ['blink (lids closed)',r=>{ tf(r,'lena-eye-l-lid-upper',`translate(0 ${BLINK})`);
+                              tf(r,'lena-eye-r-lid-upper',`translate(0 ${BLINK})`); }],
+  ['half-lid',           r=>{ tf(r,'lena-eye-l-lid-upper','translate(0 20)');
+                              tf(r,'lena-eye-r-lid-upper','translate(0 20)'); }],
+  ['squint (lower up)',  r=>{ tf(r,'lena-eye-l-lid-upper','translate(0 12)');
+                              tf(r,'lena-eye-r-lid-upper','translate(0 12)');
+                              tf(r,'lena-eye-l-lid-lower','translate(0 -14)');
+                              tf(r,'lena-eye-r-lid-lower','translate(0 -14)'); }],
+  ['wink L',             r=>{ tf(r,'lena-eye-l-lid-upper',`translate(0 ${BLINK})`); }],
+  ['look left',          r=>{ tf(r,'lena-eye-l-globe','translate(-7 0)');
+                              tf(r,'lena-eye-r-globe','translate(-7 0)'); }],
+  ['look up-right',      r=>{ tf(r,'lena-eye-l-globe','translate(7 -5)');
+                              tf(r,'lena-eye-r-globe','translate(7 -5)'); }],
+  ['tilt -8°',           r=>{ tf(r,'lena-head',`rotate(-8 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-head-back',`rotate(-8 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-ahoge','rotate(9 258 72)'); }],
+  ['tilt +8°',           r=>{ tf(r,'lena-head',`rotate(8 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-head-back',`rotate(8 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-ahoge','rotate(-9 258 72)'); }],
+  ['nod down + brows up',r=>{ tf(r,'lena-head',`translate(0 7) rotate(3 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-head-back',`translate(0 7) rotate(3 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-brow-l','translate(0 -7)');
+                              tf(r,'lena-brow-r','translate(0 -7)'); }],
+  ['brows angry',        r=>{ tf(r,'lena-brow-l','rotate(11 150 197)');
+                              tf(r,'lena-brow-r','rotate(-11 362 197)');
+                              show(r,'frown'); }],
+  ['brows sad',          r=>{ tf(r,'lena-brow-l','rotate(-10 150 197)');
+                              tf(r,'lena-brow-r','rotate(10 362 197)');
+                              tf(r,'lena-eye-l-lid-upper','translate(0 10)');
+                              tf(r,'lena-eye-r-lid-upper','translate(0 10)'); }],
+  ['mouth closed',       r=>show(r,'closed')],
+  ['mouth half',         r=>show(r,'half')],
+  ['mouth open',         r=>show(r,'open')],
+  ['mouth smile',        r=>{ show(r,'smile');
+                              tf(r,'lena-eye-l-lid-lower','translate(0 -10)');
+                              tf(r,'lena-eye-r-lid-lower','translate(0 -10)'); }],
+  ['mouth frown',        r=>show(r,'frown')],
+  ['hair sway +',        r=>{ tf(r,'lena-hair-lock-l','rotate(2.6 152 114)');
+                              tf(r,'lena-hair-lock-r','rotate(2.6 360 114)');
+                              tf(r,'lena-hair-bang-l','rotate(-2.2 250 58)');
+                              tf(r,'lena-hair-bang-r','rotate(-2.2 262 58)');
+                              tf(r,'lena-hair-back-sway-l','rotate(2.2 102 176)');
+                              tf(r,'lena-hair-back-sway-r','rotate(2.2 410 176)'); }],
+  ['hair sway −',        r=>{ tf(r,'lena-hair-lock-l','rotate(-2.6 152 114)');
+                              tf(r,'lena-hair-lock-r','rotate(-2.6 360 114)');
+                              tf(r,'lena-hair-bang-l','rotate(2.2 250 58)');
+                              tf(r,'lena-hair-bang-r','rotate(2.2 262 58)');
+                              tf(r,'lena-hair-back-sway-l','rotate(-2.2 102 176)');
+                              tf(r,'lena-hair-back-sway-r','rotate(-2.2 410 176)'); }],
+  ['ahoge perk',         r=>tf(r,'lena-ahoge','translate(258 72) scale(1.07) translate(-258 -72) rotate(-15 258 72)')],
+  ['ahoge droop',        r=>tf(r,'lena-ahoge','translate(258 72) scale(0.92) translate(-258 -72) rotate(17 258 72)')],
+  ['ahoge wag',          r=>tf(r,'lena-ahoge','rotate(-10 258 72)')],
+  ['collar accent lift', r=>{ tf(r,'lena-collar','translate(0 -4)');
+                              tf(r,'lena-cape-l','rotate(-1.6 258 390)');
+                              tf(r,'lena-cape-r','rotate(1.6 254 390)'); }],
+  ['wink + smile',       r=>{ tf(r,'lena-eye-l-lid-upper',`translate(0 ${BLINK})`);
+                              show(r,'smile');
+                              tf(r,'lena-head',`rotate(5 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-head-back',`rotate(5 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-ahoge','rotate(-10 258 72)'); }],
+  ['talk peak (compo)',  r=>{ show(r,'open');
+                              tf(r,'lena-head',`rotate(-3 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-head-back',`rotate(-3 ${HEAD_ORIGIN})`);
+                              tf(r,'lena-ahoge','rotate(6 258 72)');
+                              tf(r,'lena-brow-l','translate(0 -4)');
+                              tf(r,'lena-brow-r','translate(0 -4)'); }],
+];
+
+const PALETTE = [
+  ['hair-lit','#fdfbfe'],['hair-base','#ede8f5'],['hair-mid','#d8d0e7'],['hair-deep','#b6abcb'],
+  ['hair-line','#9a90b4'],['hair-strand','#b2a6c9'],
+  ['skin','#feeade'],['skin-lit','#fff5ef'],['skin-shade','#f7d6c9'],['skin-deep','#eabfb4'],
+  ['lid','#fde7da'],['blush','#f78289'],
+  ['lash','#2b1a26'],['iris-top','#2a0d18'],['iris-mid','#96253c'],['iris-lit','#ee6c80'],
+  ['iris-rim','#ffa8b4'],['pupil','#1c060c'],['sclera','#f8ece9'],['lower-lash','#a4676f'],
+  ['brow','#a89ab2'],['mouth','#8a4050'],['mouth-in','#5a1f2e'],['tongue','#d2596a'],
+  ['navy-lit','#454c7e'],['navy','#2e3260'],['navy-deep','#1b1d40'],['navy-line','#171935'],
+  ['cape-rim','#5d6bb2'],['gold-lit','#f8e6b6'],['gold','#dcb268'],['gold-deep','#9a6b28'],
+  ['gold-trim','#cfa459'],['uniform-white','#fbf8fd'],['uniform-shade','#d2c9e2'],
+  ['backdrop-in','#fcfbff'],['backdrop-out','#d5cceb'],
+];
+
+fetch(SRC).then(r=>r.text()).then(txt=>{
+  const doc = new DOMParser().parseFromString(txt,'image/svg+xml');
+  DOC = doc.documentElement;
+
+  document.getElementById('master').appendChild(svgAt(320));
+  document.getElementById('facezoom').appendChild(svgAt(320,'130 80 252 260'));
+  document.getElementById('ahogezoom').appendChild(svgAt(200,'120 0 190 130'));
+
+  [160,120,96,64].forEach(sz=>{
+    ['circles','circlesdark'].forEach(host=>{
+      const wrap=document.createElement('div');
+      wrap.className='cell'+(host==='circlesdark'?' dark':'');
+      if(host==='circlesdark'){wrap.style.background='#241f33';wrap.style.borderColor='#3a3350';}
+      const box=document.createElement('div'); box.className='circle';
+      box.style.width=sz+'px'; box.style.height=sz+'px';
+      box.appendChild(svgAt(sz));
+      const cap=document.createElement('div'); cap.className='cap'; cap.textContent=sz+'px';
+      wrap.appendChild(box); wrap.appendChild(cap);
+      document.getElementById(host).appendChild(wrap);
+    });
+  });
+
+  const rig=document.getElementById('rig');
+  STATES.forEach(([name,fn])=>{
+    const s=svgAt(200);
+    fn(s);
+    const cell=document.createElement('div'); cell.className='cell';
+    cell.appendChild(s);
+    const cap=document.createElement('div'); cap.className='cap'; cap.textContent=name;
+    cell.appendChild(cap); rig.appendChild(cell);
+  });
+
+  const pal=document.getElementById('palette');
+  PALETTE.forEach(([n,hex])=>{
+    const d=document.createElement('div'); d.className='sw';
+    d.innerHTML=`<div class="chip" style="background:${hex}"></div>
+      <div class="swname">${n}</div><div class="swhex">${hex}</div>`;
+    pal.appendChild(d);
+  });
+  document.body.dataset.ready='1';
+});
+</script>
+</body>
+</html>

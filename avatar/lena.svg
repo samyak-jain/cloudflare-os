@@ -1,0 +1,374 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="lena-title lena-desc">
+<title id="lena-title">Lena</title>
+<desc id="lena-desc">Chibi bust portrait: platinum hair with a looping ahoge, crimson eyes, navy military cape collar with gold cording.</desc>
+<defs>
+  <linearGradient id="lena-g-hairback" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#f9f6fc"/><stop offset="0.3" stop-color="#ede8f5"/>
+    <stop offset="0.66" stop-color="#d8d0e7"/><stop offset="1" stop-color="#b6abcb"/>
+  </linearGradient>
+  <linearGradient id="lena-g-hairfront" x1="0.15" y1="0" x2="0.5" y2="1">
+    <stop offset="0" stop-color="#fffeff"/><stop offset="0.4" stop-color="#f7f3fc"/>
+    <stop offset="0.8" stop-color="#eae4f4"/><stop offset="1" stop-color="#dbd3ea"/>
+  </linearGradient>
+  <linearGradient id="lena-g-lock" x1="0.1" y1="0" x2="0.6" y2="1">
+    <stop offset="0" stop-color="#fdfbfe"/><stop offset="0.45" stop-color="#f0ebf8"/>
+    <stop offset="1" stop-color="#c8bedd"/>
+  </linearGradient>
+  <linearGradient id="lena-g-skin" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#fff5ef"/><stop offset="0.55" stop-color="#feeade"/>
+    <stop offset="1" stop-color="#f7d6c9"/>
+  </linearGradient>
+  <linearGradient id="lena-g-iris" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#2a0d18"/><stop offset="0.18" stop-color="#380f1c"/>
+    <stop offset="0.36" stop-color="#5c1526"/><stop offset="0.56" stop-color="#96253c"/>
+    <stop offset="0.76" stop-color="#cc3f58"/><stop offset="0.91" stop-color="#ee6c80"/>
+    <stop offset="1" stop-color="#ffa8b4"/>
+  </linearGradient>
+  <radialGradient id="lena-g-blush" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#f78289" stop-opacity="0.42"/>
+    <stop offset="0.5" stop-color="#f7959c" stop-opacity="0.22"/>
+    <stop offset="1" stop-color="#f7a8ad" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="lena-g-navy" x1="0.2" y1="0" x2="0.6" y2="1">
+    <stop offset="0" stop-color="#454c7e"/><stop offset="0.5" stop-color="#2e3260"/>
+    <stop offset="1" stop-color="#1b1d40"/>
+  </linearGradient>
+  <linearGradient id="lena-g-gold" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#f8e6b6"/><stop offset="0.42" stop-color="#dcb268"/>
+    <stop offset="1" stop-color="#9a6b28"/>
+  </linearGradient>
+  <linearGradient id="lena-g-white" x1="0" y1="0" x2="0.3" y2="1">
+    <stop offset="0" stop-color="#fbf8fd"/><stop offset="1" stop-color="#d2c9e2"/>
+  </linearGradient>
+  <radialGradient id="lena-g-backdrop" cx="0.5" cy="0.4" r="0.75">
+    <stop offset="0" stop-color="#fcfbff"/><stop offset="0.58" stop-color="#eee9f8"/>
+    <stop offset="1" stop-color="#d5cceb"/>
+  </radialGradient>
+
+  <clipPath id="lena-clip-face"><path d="M141 212C141 136 190 90 256 90C322 90 371 136 371 212C371 262 354 296 326 316C304 332 278 346 256 346C234 346 208 332 186 316C158 296 141 262 141 212Z"/></clipPath>
+  <clipPath id="lena-clip-socket-l"><path d="M164 248C166 232 176 222 194 222C216 222 233 240 236 262C234 272 218 280 196 280C176 280 163 265 164 248Z"/></clipPath>
+  <clipPath id="lena-clip-socket-r"><path d="M348 248C346 232 336 222 318 222C296 222 279 240 276 262C278 272 294 280 316 280C336 280 349 265 348 248Z"/></clipPath>
+  <clipPath id="lena-clip-hairback"><path d="M256 42C176 42 124 90 114 152C107 196 107 224 100 262C93 306 80 340 64 374C46 412 22 460 4 524L508 524C490 460 466 412 448 374C432 340 419 306 412 262C405 224 405 196 398 152C388 90 336 42 256 42Z"/></clipPath>
+  <clipPath id="lena-clip-fringe"><path d="M256 46C194 48 150 78 132 126C122 152 118 184 120 212C121 218 121 228 122 236C124 226 130 216 136 212C140 224 143 240 144 254C150 240 158 226 168 220C174 222 180 222 186 226C192 220 199 216 208 214C215 216 222 218 226 222C232 218 238 214 244 212C248 220 252 226 256 238C260 226 264 220 268 212C274 214 280 218 286 222C290 218 297 216 304 214C313 216 320 220 326 226C332 222 338 222 344 220C354 226 361 240 368 254C369 240 372 226 376 212C382 216 388 226 390 238C391 230 392 222 392 212C394 184 390 152 380 126C362 78 318 48 256 46Z"/></clipPath>
+  <clipPath id="lena-clip-torso"><path d="M256 386C196 386 146 406 110 438C74 470 50 490 38 512L474 512C462 490 438 470 402 438C366 406 316 386 256 386Z"/></clipPath>
+  <clipPath id="lena-clip-frame"><rect x="0" y="0" width="512" height="512"/></clipPath>
+</defs>
+
+<g id="lena-root" clip-path="url(#lena-clip-frame)">
+
+  <g id="lena-backdrop">
+    <rect x="0" y="0" width="512" height="512" fill="url(#lena-g-backdrop)"/>
+    <g id="lena-backdrop-sparkles" fill="#c6bbe2" opacity="0.3">
+      <path d="M52 168 L56 184 L72 188 L56 192 L52 208 L48 192 L32 188 L48 184Z"/>
+      <path d="M462 128 L465 140 L477 143 L465 146 L462 158 L459 146 L447 143 L459 140Z"/>
+      <path d="M478 318 L481 329 L492 332 L481 335 L478 346 L475 335 L464 332 L475 329Z"/>
+      <path d="M30 352 L33 363 L44 366 L33 369 L30 380 L27 369 L16 366 L27 363Z"/>
+    </g>
+  </g>
+
+  <g id="lena-head-back">
+    <g id="lena-hair-back">
+      <path id="lena-hair-back-mass" d="M256 42C176 42 124 90 114 152C107 196 107 224 100 262C93 306 80 340 64 374C46 412 22 460 4 524L508 524C490 460 466 412 448 374C432 340 419 306 412 262C405 224 405 196 398 152C388 90 336 42 256 42Z" fill="url(#lena-g-hairback)" stroke="#9a90b4" stroke-width="1.9" stroke-linejoin="round"/>
+      <g id="lena-hair-back-shading" clip-path="url(#lena-clip-hairback)">
+        <path d="M256 54C198 78 168 142 160 224C152 306 142 404 122 512L78 512C104 390 120 290 128 220C138 138 190 74 256 54Z" fill="#ded6ec" opacity="0.55"/>
+        <path d="M256 54C314 78 344 142 352 224C360 306 370 404 390 512L434 512C408 390 392 290 384 220C374 138 322 74 256 54Z" fill="#ded6ec" opacity="0.55"/>
+        <path d="M110 180C102 262 84 356 56 456L42 512L12 512C42 400 70 284 88 180Z" fill="#b9adD2" opacity="0.5"/>
+        <path d="M402 180C410 262 428 356 456 456L470 512L500 512C470 400 442 284 424 180Z" fill="#b9adD2" opacity="0.5"/>
+        <path d="M216 100C196 158 186 244 186 334C186 418 182 468 174 512L200 512C206 456 208 400 210 336C212 244 218 158 230 102Z" fill="#f7f4fc" opacity="0.55"/>
+        <path d="M296 100C316 158 326 244 326 334C326 418 330 468 338 512L312 512C306 456 304 400 302 336C300 244 294 158 282 102Z" fill="#f7f4fc" opacity="0.55"/>
+        <path d="M256 58C238 116 234 200 238 306C242 410 242 468 238 512L274 512C270 468 270 410 274 306C278 200 274 116 256 58Z" fill="#fdfbfe" opacity="0.5"/>
+        <path d="M118 226C112 296 100 352 82 404C70 440 68 476 90 504C80 468 84 434 96 396C112 342 122 288 126 224Z" fill="#cdc2e0" opacity="0.45"/>
+        <path d="M394 226C400 296 412 352 430 404C442 440 444 476 422 504C432 468 428 434 416 396C400 342 390 288 386 224Z" fill="#cdc2e0" opacity="0.45"/>
+        <g fill="none" stroke="#b4a8cc" stroke-width="1.7" stroke-linecap="round" opacity="0.42">
+          <path d="M198 78C168 122 152 190 148 262C144 336 138 430 126 512"/>
+          <path d="M172 106C148 158 140 220 138 292C136 366 132 448 124 512"/>
+          <path d="M228 66C208 128 200 210 200 300C200 392 196 460 190 512"/>
+          <path d="M314 78C344 122 360 190 364 262C368 336 374 430 386 512"/>
+          <path d="M340 106C364 158 372 220 374 292C376 366 380 448 388 512"/>
+          <path d="M284 66C304 128 312 210 312 300C312 392 316 460 322 512"/>
+          <path d="M104 250C98 320 86 380 68 434C56 470 50 494 46 512"/>
+          <path d="M408 250C414 320 426 380 444 434C456 470 462 494 466 512"/>
+        </g>
+        <path d="M16 512C28 456 46 412 64 374L74 386C58 424 44 466 36 512Z" fill="#a294bd" opacity="0.35"/>
+        <path d="M496 512C484 456 466 412 448 374L438 386C454 424 468 466 476 512Z" fill="#a294bd" opacity="0.35"/>
+      </g>
+      <g id="lena-hair-back-sway-l">
+        <path d="M102 176C98 254 84 330 58 398C38 452 20 490 8 528L-24 528C-22 470 10 408 30 352C52 292 88 236 92 174Z" fill="url(#lena-g-hairback)" stroke="#9a90b4" stroke-width="1.7" stroke-linejoin="round"/>
+        <path d="M118 250C112 320 100 376 80 428C64 470 54 494 50 512L70 512C76 478 88 434 102 388C118 336 128 292 128 250Z" fill="#f3eefa" opacity="0.5"/>
+        <path d="M104 300C96 356 82 404 62 448C50 474 44 496 46 512L34 512C30 490 38 462 52 430C74 382 90 340 96 298Z" fill="#c6bbdd" opacity="0.4"/>
+      </g>
+      <g id="lena-hair-back-sway-r">
+        <path d="M410 176C414 254 428 330 454 398C474 452 492 490 504 528L536 528C534 470 502 408 482 352C460 292 424 236 420 174Z" fill="url(#lena-g-hairback)" stroke="#9a90b4" stroke-width="1.7" stroke-linejoin="round"/>
+        <path d="M394 250C400 320 412 376 432 428C448 470 458 494 462 512L442 512C436 478 424 434 410 388C394 336 384 292 384 250Z" fill="#f3eefa" opacity="0.5"/>
+        <path d="M408 300C416 356 430 404 450 448C462 474 468 496 466 512L478 512C482 490 474 462 460 430C438 382 422 340 416 298Z" fill="#c6bbdd" opacity="0.4"/>
+      </g>
+    </g>
+  </g>
+
+  <g id="lena-body">
+    <g id="lena-torso">
+      <path d="M256 386C196 386 146 406 110 438C74 470 50 490 38 512L474 512C462 490 438 470 402 438C366 406 316 386 256 386Z" fill="url(#lena-g-white)" stroke="#1b1d40" stroke-width="2.6" stroke-linejoin="round"/>
+      <g clip-path="url(#lena-clip-torso)">
+        <path d="M256 396L320 436L326 512L186 512L192 436Z" fill="url(#lena-g-white)"/>
+        <path d="M198 424C216 452 296 452 314 424L318 446C294 470 218 470 194 446Z" fill="#c9c0dc" opacity="0.5"/>
+        <path d="M253 432L259 432L262 512L250 512Z" fill="#c6bdd8" opacity="0.6"/>
+      </g>
+    </g>
+    <g id="lena-cape-l">
+      <path d="M258 388C200 388 150 408 116 440C82 470 58 490 46 512L206 512C204 456 212 412 232 394Z" fill="url(#lena-g-navy)" stroke="#171935" stroke-width="2.6" stroke-linejoin="round"/>
+      <path d="M116 440C86 470 66 490 54 512L46 512C58 490 82 470 116 440Z" fill="#5d6bb2" opacity="0.7"/>
+      <path d="M194 512C192 458 200 416 220 396L232 394C212 412 204 456 206 512Z" fill="#4e5a96" opacity="0.5"/>
+      <path d="M176 400C154 418 134 448 122 480C116 494 112 504 110 512" fill="none" stroke="#5d6bb2" stroke-width="2.4" stroke-linecap="round" opacity="0.55"/>
+      <path d="M232 394C216 414 208 452 208 490C208 500 208 507 208 512" fill="none" stroke="#141630" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+      <g id="lena-epaulette-l">
+        <path d="M112 444C128 428 148 416 168 409L184 436C162 444 142 456 128 472Z" fill="#454c80" stroke="#171935" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M112 444C128 428 148 416 168 409L172 416C152 424 134 436 120 452Z" fill="#cfa459" opacity="0.9"/>
+        <rect x="82" y="474" width="44" height="13" rx="6" transform="rotate(-30 104 480)" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.4"/>
+        <rect x="70" y="502" width="44" height="13" rx="6" transform="rotate(-30 92 508)" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.4"/>
+      </g>
+    </g>
+    <g id="lena-cape-r">
+      <path d="M254 388C312 388 362 408 396 440C430 470 454 490 466 512L306 512C308 456 300 412 280 394Z" fill="url(#lena-g-navy)" stroke="#171935" stroke-width="2.6" stroke-linejoin="round"/>
+      <path d="M396 440C426 470 446 490 458 512L466 512C454 490 430 470 396 440Z" fill="#5d6bb2" opacity="0.7"/>
+      <path d="M318 512C320 458 312 416 292 396L280 394C300 412 308 456 306 512Z" fill="#4e5a96" opacity="0.5"/>
+      <path d="M336 400C358 418 378 448 390 480C396 494 400 504 402 512" fill="none" stroke="#5d6bb2" stroke-width="2.4" stroke-linecap="round" opacity="0.55"/>
+      <path d="M280 394C296 414 304 452 304 490C304 500 304 507 304 512" fill="none" stroke="#141630" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+      <g id="lena-epaulette-r">
+        <path d="M400 444C384 428 364 416 344 409L328 436C350 444 370 456 384 472Z" fill="#454c80" stroke="#171935" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M400 444C384 428 364 416 344 409L340 416C360 424 378 436 392 452Z" fill="#cfa459" opacity="0.9"/>
+        <rect x="386" y="474" width="44" height="13" rx="6" transform="rotate(30 408 480)" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.4"/>
+        <rect x="398" y="502" width="44" height="13" rx="6" transform="rotate(30 420 508)" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.4"/>
+      </g>
+    </g>
+    <g id="lena-insignia">
+      <path d="M190 460C214 502 300 508 328 470" fill="none" stroke="#c2933f" stroke-width="4.8" stroke-linecap="round"/>
+      <path d="M190 460C214 502 300 508 328 470" fill="none" stroke="#f3ddaa" stroke-width="1.8" stroke-linecap="round" opacity="0.75"/>
+      <path d="M200 482C226 520 306 526 334 492" fill="none" stroke="#c2933f" stroke-width="4" stroke-linecap="round" opacity="0.9"/>
+      <g id="lena-chest-star">
+        <g transform="translate(256 470)">
+          <path d="M0 -22L5.5 -7L21 -1L5.5 5L0 20L-5.5 5L-21 -1L-5.5 -7Z" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.5" stroke-linejoin="round"/>
+          <circle cx="0" cy="-1" r="3.8" fill="#f9ecc7"/>
+        </g>
+      </g>
+      <circle cx="256" cy="504" r="5.4" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.3"/>
+      <circle cx="216" cy="492" r="4" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.1"/>
+      <circle cx="296" cy="492" r="4" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.1"/>
+    </g>
+  </g>
+
+  <g id="lena-neck">
+    <path d="M220 300L220 376C232 394 280 394 292 376L292 300Z" fill="url(#lena-g-skin)"/>
+    <path d="M220 300L220 342C232 364 280 364 292 342L292 300Z" fill="#e7ab9f" opacity="0.6"/>
+  </g>
+
+  <g id="lena-collar">
+    <path d="M198 412C196 378 206 360 228 354L256 366L284 354C306 360 316 378 314 412C314 426 305 436 292 440L220 440C207 436 198 426 198 412Z" fill="url(#lena-g-navy)" stroke="#171935" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M198 412C196 378 206 360 228 354L232 366C216 372 208 390 210 414Z" fill="#5d6bb2" opacity="0.55"/>
+    <path d="M314 412C316 378 306 360 284 354L280 366C296 372 304 390 302 414Z" fill="#5d6bb2" opacity="0.55"/>
+    <path d="M228 354L256 366L284 354" fill="none" stroke="#cfa459" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M228 354L256 366L284 354" fill="none" stroke="#f6e2ae" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+    <path d="M201 406C199 376 209 364 226 359" fill="none" stroke="#cfa459" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M311 406C313 376 303 364 286 359" fill="none" stroke="#cfa459" stroke-width="2.6" stroke-linecap="round"/>
+    <g id="lena-collar-clasp">
+      <circle cx="256" cy="386" r="9" fill="url(#lena-g-gold)" stroke="#8b6224" stroke-width="1.5"/>
+      <circle cx="256" cy="384" r="3.2" fill="#fbf1d4"/>
+    </g>
+  </g>
+
+  <g id="lena-head">
+    <g id="lena-head-shape">
+      <path id="lena-face" d="M141 212C141 136 190 90 256 90C322 90 371 136 371 212C371 262 354 296 326 316C304 332 278 346 256 346C234 346 208 332 186 316C158 296 141 262 141 212Z" fill="url(#lena-g-skin)" stroke="#e8bbac" stroke-width="1.8"/>
+    </g>
+
+    <g id="lena-face-features" clip-path="url(#lena-clip-face)">
+      <g id="lena-face-shading">
+        <path d="M130 84L382 84L382 214C362 200 350 224 332 212C314 202 306 228 286 216C268 207 260 224 240 214C222 205 210 222 194 210C178 198 156 212 130 204Z" fill="#eabfb4" opacity="0.34"/>
+        <path d="M141 200C141 258 152 296 180 320L158 328C134 302 126 250 128 200Z" fill="#f0c5b8" opacity="0.36"/>
+        <path d="M371 200C371 258 360 296 332 320L354 328C378 302 386 250 384 200Z" fill="#f0c5b8" opacity="0.36"/>
+        <ellipse cx="256" cy="340" rx="52" ry="14" fill="#f0c1b3" opacity="0.3"/>
+      </g>
+      <g id="lena-blush">
+        <ellipse cx="181" cy="296" rx="32" ry="15" fill="url(#lena-g-blush)"/>
+        <ellipse cx="331" cy="296" rx="32" ry="15" fill="url(#lena-g-blush)"/>
+        <g fill="#ef858c" opacity="0.26">
+          <rect x="166" y="290" width="17" height="2.6" rx="1.3" transform="rotate(-16 174 291)"/>
+          <rect x="173" y="300" width="17" height="2.6" rx="1.3" transform="rotate(-16 181 301)"/>
+          <rect x="329" y="290" width="17" height="2.6" rx="1.3" transform="rotate(16 337 291)"/>
+          <rect x="322" y="300" width="17" height="2.6" rx="1.3" transform="rotate(16 330 301)"/>
+        </g>
+      </g>
+      <g id="lena-nose"><ellipse cx="258" cy="298" rx="3.6" ry="2.2" fill="#e79c8a" opacity="0.4"/></g>
+      <g id="lena-mouths">
+        <g id="lena-mouth-closed">
+          <path d="M245 314C249 320 253 320 256 316.5C259 320 263 320 267 314" fill="none" stroke="#8a4050" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+        <g id="lena-mouth-half" display="none">
+          <path d="M241 313C248 308 264 308 271 313C267 328 245 328 241 313Z" fill="#5a1f2e"/>
+          <path d="M247 322C252 328 260 328 265 322C261 327 251 327 247 322Z" fill="#d2596a"/>
+          <path d="M241 313C248 308 264 308 271 313" fill="none" stroke="#8a4050" stroke-width="2.2" stroke-linecap="round"/>
+        </g>
+        <g id="lena-mouth-open" display="none">
+          <path d="M240 312C246 305 266 305 272 312C277 324 268 341 256 341C244 341 235 324 240 312Z" fill="#5a1f2e"/>
+          <ellipse cx="256" cy="335" rx="10" ry="6" fill="#d2596a"/>
+          <path d="M240 312C246 305 266 305 272 312" fill="none" stroke="#8a4050" stroke-width="2.2" stroke-linecap="round"/>
+        </g>
+        <g id="lena-mouth-smile" display="none">
+          <path d="M240 312C247 328 265 328 272 312C265 320 247 320 240 312Z" fill="#8a4050"/>
+        </g>
+        <g id="lena-mouth-frown" display="none">
+          <path d="M241 325C248 312 264 312 271 325" fill="none" stroke="#8a4050" stroke-width="3.8" stroke-linecap="round"/>
+        </g>
+      </g>
+    </g>
+
+    <g id="lena-eyes">
+      <g id="lena-eye-l">
+        <path id="lena-eye-l-white" d="M164 248C166 232 176 222 194 222C216 222 233 240 236 262C234 272 218 280 196 280C176 280 163 265 164 248Z" fill="#f8ece9"/>
+        <g clip-path="url(#lena-clip-socket-l)">
+          <g id="lena-eye-l-globe">
+            <ellipse cx="196" cy="252" rx="27" ry="29" fill="url(#lena-g-iris)"/>
+            <path d="M180 254C179 264 179 272 180 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M187 254C186 264 186 272 187 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M205 254C204 264 204 272 205 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M212 254C211 264 211 272 212 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/>
+            <ellipse cx="196" cy="272" rx="15" ry="7" fill="#ff8a9c" opacity="0.42"/>
+            <ellipse cx="196" cy="252" rx="27" ry="29" fill="none" stroke="#4e1322" stroke-width="2" opacity="0.35"/>
+            <ellipse id="lena-eye-l-pupil" cx="196" cy="250" rx="5.6" ry="13" fill="#1c060c"/>
+            <ellipse cx="183" cy="237" rx="8.2" ry="6.1" fill="#ffffff" opacity="0.95" transform="rotate(-26 183 237)"/>
+            <circle cx="211" cy="239" r="2.7" fill="#ffffff" opacity="0.88"/>
+            <circle cx="204" cy="268" r="2" fill="#ffffff" opacity="0.6"/>
+          </g>
+          <g id="lena-eye-l-lid-lower">
+            <rect x="130" y="279" width="132" height="110" fill="#fce7dd"/>
+            <path d="M172 268C180 277 188 280 197 280C215 279 228 270 233 258" fill="none" stroke="#a4676f" stroke-width="2.6" stroke-linecap="round" opacity="0.72"/>
+          </g>
+          <g id="lena-eye-l-lid-upper">
+            <rect x="130" y="2" width="132" height="220" fill="#fde7da"/>
+            <path d="M164 248C166 232 176 222 194 222C216 222 233 240 236 262C228 232 212 206 190 207C170 208 163 228 164 248Z" fill="#f6d3c7" opacity="0.5"/>
+            <path d="M164 248C166 232 176 222 194 222C216 222 233 240 236 262C231 238 216 214 192 215C173 216 164 232 164 248Z" fill="#f2c6b9" opacity="0.35"/>
+            <path d="M164 248C166 232 176 222 194 222C216 222 233 240 236 262C233 244 217 232 193 233C175 234 165 240 164 248Z" fill="#2b1a26"/>
+            <path d="M170 232C180 221 188 217 197 217C210 217 222 225 230 238" fill="none" stroke="#6b5563" stroke-width="1.7" stroke-linecap="round" opacity="0.35"/>
+          </g>
+        </g>
+        <g id="lena-eye-l-lashtip">
+          <path d="M166 246C160 243 154 239 148 233C155 236 162 240 168 243Z" fill="#2b1a26"/>
+        </g>
+      </g>
+      <g id="lena-eye-r">
+        <path id="lena-eye-r-white" d="M348 248C346 232 336 222 318 222C296 222 279 240 276 262C278 272 294 280 316 280C336 280 349 265 348 248Z" fill="#f8ece9"/>
+        <g clip-path="url(#lena-clip-socket-r)">
+          <g id="lena-eye-r-globe">
+            <ellipse cx="316" cy="252" rx="27" ry="29" fill="url(#lena-g-iris)"/>
+            <path d="M300 254C299 264 299 272 300 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M307 254C306 264 306 272 307 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M325 254C324 264 324 272 325 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/><path d="M332 254C331 264 331 272 332 279" stroke="#8f2135" stroke-width="1.6" fill="none" opacity="0.35"/>
+            <ellipse cx="316" cy="272" rx="15" ry="7" fill="#ff8a9c" opacity="0.42"/>
+            <ellipse cx="316" cy="252" rx="27" ry="29" fill="none" stroke="#4e1322" stroke-width="2" opacity="0.35"/>
+            <ellipse id="lena-eye-r-pupil" cx="316" cy="250" rx="5.6" ry="13" fill="#1c060c"/>
+            <ellipse cx="303" cy="237" rx="8.2" ry="6.1" fill="#ffffff" opacity="0.95" transform="rotate(-26 303 237)"/>
+            <circle cx="331" cy="239" r="2.7" fill="#ffffff" opacity="0.88"/>
+            <circle cx="324" cy="268" r="2" fill="#ffffff" opacity="0.6"/>
+          </g>
+          <g id="lena-eye-r-lid-lower">
+            <rect x="250" y="279" width="132" height="110" fill="#fce7dd"/>
+            <path d="M340 268C332 277 324 280 315 280C297 279 284 270 279 258" fill="none" stroke="#a4676f" stroke-width="2.6" stroke-linecap="round" opacity="0.72"/>
+          </g>
+          <g id="lena-eye-r-lid-upper">
+            <rect x="250" y="2" width="132" height="220" fill="#fde7da"/>
+            <path d="M348 248C346 232 336 222 318 222C296 222 279 240 276 262C284 232 300 206 322 207C342 208 349 228 348 248Z" fill="#f6d3c7" opacity="0.5"/>
+            <path d="M348 248C346 232 336 222 318 222C296 222 279 240 276 262C281 238 296 214 320 215C339 216 348 232 348 248Z" fill="#f2c6b9" opacity="0.35"/>
+            <path d="M348 248C346 232 336 222 318 222C296 222 279 240 276 262C279 244 295 232 319 233C337 234 347 240 348 248Z" fill="#2b1a26"/>
+            <path d="M342 232C332 221 324 217 315 217C302 217 290 225 282 238" fill="none" stroke="#6b5563" stroke-width="1.7" stroke-linecap="round" opacity="0.35"/>
+          </g>
+        </g>
+        <g id="lena-eye-r-lashtip">
+          <path d="M346 246C352 243 358 239 364 233C357 236 350 240 344 243Z" fill="#2b1a26"/>
+        </g>
+      </g>
+    </g>
+
+    <g id="lena-hair-front">
+      <g id="lena-hair-lock-l">
+        <path d="M152 114C124 156 106 212 102 264C99 304 112 338 106 378C101 420 94 472 80 512L178 512C188 462 186 412 179 364C170 306 154 254 152 208C150 168 152 138 152 114Z" fill="url(#lena-g-lock)" stroke="#9a90b4" stroke-width="1.9" stroke-linejoin="round"/>
+        <path d="M152 114C130 158 116 214 120 266C123 306 130 340 124 380C119 422 112 472 98 512L80 512C94 472 101 420 106 378C112 338 99 304 102 264C106 212 124 156 152 114Z" fill="#fdfcff" opacity="0.5"/>
+        <path d="M152 216C154 268 166 324 172 376C178 424 176 470 168 512L146 512C154 470 156 424 150 378C144 326 134 272 132 220Z" fill="#c3b8d9" opacity="0.4"/>
+        <path d="M148 236C152 296 164 352 178 400C188 434 195 460 196 478C185 456 171 428 159 396C143 352 136 294 136 236Z" fill="#d5cae8" opacity="0.4"/>
+        <g fill="none" stroke="#b2a6c9" stroke-width="1.5" stroke-linecap="round" opacity="0.5">
+          <path d="M143 150C126 196 116 258 120 320C124 382 122 456 112 512"/>
+          <path d="M162 172C156 234 158 302 164 368C170 430 170 474 166 512"/>
+        </g>
+      </g>
+      <g id="lena-hair-lock-r">
+        <path d="M360 114C388 156 406 212 410 264C413 304 400 338 406 378C411 420 418 472 432 512L334 512C324 462 326 412 333 364C342 306 358 254 360 208C362 168 360 138 360 114Z" fill="url(#lena-g-lock)" stroke="#9a90b4" stroke-width="1.9" stroke-linejoin="round"/>
+        <path d="M360 114C382 158 396 214 392 266C389 306 382 340 388 380C393 422 400 472 414 512L432 512C418 472 411 420 406 378C400 338 413 304 410 264C406 212 388 156 360 114Z" fill="#fdfcff" opacity="0.36"/>
+        <path d="M360 216C358 268 346 324 340 376C334 424 336 470 344 512L366 512C358 470 356 424 362 378C368 326 378 272 380 220Z" fill="#c3b8d9" opacity="0.4"/>
+        <path d="M364 236C360 296 348 352 334 400C324 434 317 460 316 478C327 456 341 428 353 396C369 352 376 294 376 236Z" fill="#d5cae8" opacity="0.4"/>
+        <g fill="none" stroke="#b2a6c9" stroke-width="1.5" stroke-linecap="round" opacity="0.5">
+          <path d="M369 150C386 196 396 258 392 320C388 382 390 456 400 512"/>
+          <path d="M350 172C356 234 354 302 348 368C342 430 342 474 346 512"/>
+        </g>
+      </g>
+
+      <g id="lena-hair-wisps">
+        <path d="M152 198C150 234 154 268 164 300C170 318 176 330 181 338C170 324 160 304 152 280C144 252 143 224 145 196Z" fill="#f5f1fb" stroke="#bcb1d3" stroke-width="1.2" stroke-linejoin="round" opacity="0.6"/>
+        <path d="M360 198C362 234 358 268 348 300C342 318 336 330 331 338C342 324 352 304 360 280C368 252 369 224 367 196Z" fill="#f5f1fb" stroke="#bcb1d3" stroke-width="1.2" stroke-linejoin="round" opacity="0.6"/>
+      </g>
+      <g id="lena-hair-fringe">
+        <path id="lena-hair-fringe-base" d="M256 46C194 48 150 78 132 126C122 152 118 184 120 212C121 218 121 228 122 236C124 226 130 216 136 212C140 224 143 240 144 254C150 240 158 226 168 220C174 222 180 222 186 226C192 220 199 216 208 214C215 216 222 218 226 222C232 218 238 214 244 212C248 220 252 226 256 238C260 226 264 220 268 212C274 214 280 218 286 222C290 218 297 216 304 214C313 216 320 220 326 226C332 222 338 222 344 220C354 226 361 240 368 254C369 240 372 226 376 212C382 216 388 226 390 238C391 230 392 222 392 212C394 184 390 152 380 126C362 78 318 48 256 46Z" fill="url(#lena-g-hairfront)" stroke="#9a90b4" stroke-width="1.9" stroke-linejoin="round"/>
+        <g id="lena-hair-fringe-shade" clip-path="url(#lena-clip-fringe)">
+          <path d="M256 46C236 82 226 132 222 184C220 208 221 222 224 234L206 214C210 168 220 112 238 72Z" fill="#ddd4ec" opacity="0.3"/>
+          <path d="M256 46C276 82 286 132 290 184C292 208 291 222 288 234L306 214C302 168 292 112 274 72Z" fill="#ddd4ec" opacity="0.3"/>
+          <path d="M120 212C118 180 124 150 136 126C126 156 124 188 128 220Z" fill="#fefdff" opacity="0.75"/>
+          <g fill="none" stroke="#b9aed0" stroke-width="1.5" stroke-linecap="round" opacity="0.5">
+            <path d="M244 56C208 82 176 128 156 182C148 202 145 228 144 248"/>
+            <path d="M250 54C226 88 202 138 192 182C188 202 186 214 186 224"/>
+            <path d="M254 54C240 96 228 148 225 190C224 206 226 214 226 220"/>
+            <path d="M258 54C272 96 284 148 287 190C288 206 286 214 286 220"/>
+            <path d="M262 54C286 88 310 138 320 182C324 202 326 214 326 224"/>
+            <path d="M268 56C304 82 336 128 356 182C364 210 367 232 368 252"/>
+          </g>
+          <g fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" opacity="0.55">
+            <path d="M240 62C208 92 180 136 164 184"/>
+            <path d="M272 62C304 92 332 136 348 184"/>
+          </g>
+          <path d="M392 212C394 180 388 150 376 126C386 156 388 188 384 220Z" fill="#fefdff" opacity="0.6"/>
+        </g>
+      </g>
+
+      <g id="lena-hair-bang-l">
+        <path d="M236 60C214 92 198 138 192 186C189 208 191 222 196 236C202 214 208 190 216 164C226 122 234 84 236 60Z" fill="url(#lena-g-hairfront)" stroke="#b3a8c9" stroke-width="1.3" stroke-linejoin="round" opacity="0.6"/><path d="M188 84C164 118 146 168 142 216C140 236 142 250 146 262C150 238 154 210 162 182C170 142 182 104 188 84Z" fill="url(#lena-g-hairfront)" stroke="#b3a8c9" stroke-width="1.3" stroke-linejoin="round" opacity="0.6"/>
+      </g>
+      <g id="lena-hair-bang-r">
+        <path d="M276 60C298 92 314 138 320 186C323 208 321 222 316 236C310 214 304 190 296 164C286 122 278 84 276 60Z" fill="url(#lena-g-hairfront)" stroke="#b3a8c9" stroke-width="1.3" stroke-linejoin="round" opacity="0.6"/><path d="M324 84C348 118 366 168 370 216C372 236 370 250 366 262C362 238 358 210 350 182C342 142 330 104 324 84Z" fill="url(#lena-g-hairfront)" stroke="#b3a8c9" stroke-width="1.3" stroke-linejoin="round" opacity="0.6"/>
+      </g>
+
+      <g id="lena-hair-gloss" clip-path="url(#lena-clip-fringe)">
+        <g opacity="0.3" fill="#ffffff">
+          <ellipse cx="167" cy="199" rx="31" ry="19" transform="rotate(-58 167 199)"/>
+          <ellipse cx="197" cy="170" rx="33" ry="19" transform="rotate(-34 197 170)"/>
+          <ellipse cx="235" cy="152" rx="34" ry="19" transform="rotate(-9 235 152)"/>
+          <ellipse cx="279" cy="153" rx="33" ry="19" transform="rotate(15 279 153)"/>
+          <ellipse cx="319" cy="173" rx="31" ry="19" transform="rotate(43 319 173)"/>
+          <ellipse cx="343" cy="199" rx="27" ry="17" transform="rotate(58 343 199)"/>
+        </g>
+        <g opacity="0.55" fill="#ffffff">
+          <ellipse cx="169" cy="197" rx="20" ry="8" transform="rotate(-58 169 197)"/>
+          <ellipse cx="199" cy="168" rx="22" ry="8.4" transform="rotate(-34 199 168)"/>
+          <ellipse cx="237" cy="150" rx="23" ry="8.4" transform="rotate(-9 237 150)"/>
+          <ellipse cx="278" cy="151" rx="22" ry="8.4" transform="rotate(15 278 151)"/>
+          <ellipse cx="318" cy="171" rx="20" ry="8" transform="rotate(43 318 171)"/>
+          <ellipse cx="342" cy="197" rx="17" ry="7.4" transform="rotate(58 342 197)"/>
+        </g>
+      </g>
+    </g>
+
+    <g id="lena-brows">
+      <g id="lena-brow-l">
+        <path d="M150 197C166 187 200 187 231 200C233 201 232 205 229 204C200 194 175 192 159 201C155 203 148 200 150 197Z" fill="#a89ab2" opacity="0.72"/>
+      </g>
+      <g id="lena-brow-r">
+        <path d="M362 197C346 187 312 187 281 200C279 201 280 205 283 204C312 194 337 192 353 201C357 203 364 200 362 197Z" fill="#a89ab2" opacity="0.72"/>
+      </g>
+    </g>
+
+    <g id="lena-ahoge">
+      <path id="lena-ahoge-strand" d="M 262.5 73.6 L 265.8 68.4 269 63.3 272.1 58.3 274.9 53.4 277.5 48.6 279.9 43.9 281.9 39.4 283.5 35 284.6 30.6 285.2 26.3 285.2 22.1 284.5 18 282.8 14.1 280.3 10.7 276.6 7.8 272.3 5.6 267.4 4.1 262 3 256.2 2.4 250 2.1 243.6 2.3 236.9 2.9 230.1 3.9 223.3 5.3 216.5 7.2 209.8 9.4 203.4 12.1 197.3 15.3 191.6 18.9 186.4 22.9 182.7 26.5 179.6 30.2 177.1 34 175.2 37.9 174.1 41.8 173.5 45.7 173.7 49.6 174.6 53.3 176.1 56.8 178.2 60 181 62.8 184.3 65.4 188.1 67.5 192.5 69.3 197.3 70.7 201.1 71.5 204.9 71.9 208.7 72 212.5 71.8 216.1 71.3 219.8 70.5 223.3 69.5 226.8 68.1 230.2 66.5 233.5 64.7 236.7 62.6 239.7 60.4 242.7 57.9 245.6 55.2 248.4 52.4 L 247.6 51.6 244.7 54.2 241.7 56.6 238.6 58.7 235.4 60.6 232.2 62.3 228.9 63.7 225.6 64.9 222.3 65.9 218.9 66.6 215.6 67.1 212.2 67.3 208.8 67.2 205.5 66.9 202.1 66.2 198.7 65.3 194.5 63.9 190.8 62.3 187.7 60.4 185.2 58.3 183.3 56 181.9 53.7 181 51.3 180.5 48.8 180.6 46.2 181.1 43.5 182.1 40.7 183.6 37.8 185.7 34.9 188.3 32 191.6 29.1 196.2 25.5 201.3 22.4 206.9 19.7 212.8 17.3 218.9 15.4 225.2 13.8 231.6 12.6 237.9 11.8 244 11.4 249.9 11.3 255.4 11.7 260.4 12.4 264.9 13.4 268.5 14.7 271.4 16.2 272.6 17.6 273.5 19.1 274 20.7 274.2 22.7 274 25.1 273.3 27.9 272.2 31.1 270.7 34.7 268.9 38.5 266.6 42.7 264.1 47 261.2 51.6 258.1 56.4 254.9 61.3 251.5 66.4 Z" fill="url(#lena-g-lock)" stroke="#9a90b4" stroke-width="1.7" stroke-linejoin="round"/>
+    </g>
+  </g>
+</g>
+</svg>
