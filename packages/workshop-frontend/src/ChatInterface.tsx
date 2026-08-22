@@ -8015,6 +8015,24 @@ function ChatInterface({
 
                         {msg.type === "connectionRequest" && renderConnectionRequestCard(msg)}
 
+                        {msg.type === "generativeUiAction" && (
+                          <div className="max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
+                            <Tooltip content={formatFullTimestamp(msg.timestamp)} asChild>
+                              <span className="inline-flex items-center gap-3 px-1.5">
+                                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                  <Layout size={16} />
+                                </span>
+                                <span>
+                                  Submitted interface action{" "}
+                                  <code className="font-mono text-[13px] text-kumo-default">
+                                    {msg.action}
+                                  </code>
+                                </span>
+                              </span>
+                            </Tooltip>
+                          </div>
+                        )}
+
                         {msg.type === "useGadget" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
                             <Tooltip content={`Used the gadget at ${formatFullTimestamp(msg.timestamp)}`} asChild>

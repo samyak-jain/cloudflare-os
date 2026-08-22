@@ -77,10 +77,16 @@ import {
   listRenderUIBindPaths,
   renderUIStateValue,
   setRenderUIStateValue,
+  validateRenderUIBindValue,
   validateRenderUIState,
 } from "./render-ui";
 
 const logger = createWorkshopLogger("workshop.overseer");
+const GENERATIVE_UI_NOTICE_AUTHOR = {
+  type: "gadget",
+  id: "renderUI",
+  name: "Interface submission",
+} as const satisfies AiChatAuthorInfo;
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
 let CODE_MODE_HARNESS =
@@ -7597,7 +7603,7 @@ class OverseerImpl implements AgentHooks {
     // path in a later card carries its current chat-scoped value forward into that card's durable
     // defaults, then validates it against the new control before anything is committed.
     let effectiveState = structuredClone(result.stateDefaults);
-    let initialValues = new Map<string, string | number | boolean>();
+    let valuesToStore = new Map<string, string | number | boolean>();
     for (let statePath of listRenderUIBindPaths(result.tree)) {
       let defaultValue = renderUIStateValue(effectiveState, statePath);
       if (typeof defaultValue !== "string" && typeof defaultValue !== "number" &&
@@ -7605,14 +7611,25 @@ class OverseerImpl implements AgentHooks {
         throw new Error(`renderUI bind path ${JSON.stringify(statePath)} is not primitive.`);
       }
       let existing = this.storage.renderUIState.get(renderUIStateKey(chatId, statePath));
-      if (existing) setRenderUIStateValue(effectiveState, statePath, existing.value);
-      else initialValues.set(statePath, defaultValue);
+      if (existing) {
+        try {
+          validateRenderUIBindValue(result.tree, statePath, existing.value);
+          setRenderUIStateValue(effectiveState, statePath, existing.value);
+        } catch {
+          // The agent may legitimately reuse a path for a different control in a later card.
+          // A stale incompatible value must not make every retry fail forever: reset this path to
+          // the fresh, already-validated default and replace its durable record below.
+          valuesToStore.set(statePath, defaultValue);
+        }
+      } else {
+        valuesToStore.set(statePath, defaultValue);
+      }
     }
     validateRenderUIState(result.tree, effectiveState);
     result.stateDefaults = effectiveState;
 
     this.ctx.storage.transactionSync(() => {
-      for (let [statePath, value] of initialValues) {
+      for (let [statePath, value] of valuesToStore) {
         this.storage.renderUIState.put({
           chatId, statePath, value,
         });
@@ -10250,7 +10267,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async submitGenerativeUiAction(
       chatId: number, toolCallId: string, action: string,
       state: Record<string, unknown>): Promise<void> {
-    let author = await this.#getClientProfile();
     this.impl.assertChatNotActive(chatId);
     let {message, toolCall} = this.#findGenerativeUiCall(chatId, toolCallId);
     if (toolCall.output?.consumed) {
@@ -10260,19 +10276,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`No enabled Button allows renderUI action ${JSON.stringify(action)}.`);
     }
     let prepared = this.#prepareGenerativeUiState(chatId, toolCall, state);
-    let submission = `Submitted interface action ${JSON.stringify(action)}.`;
-    if (Object.keys(prepared.state).length > 0) {
-      submission += `\n\nCurrent interface state:\n\`\`\`json\n` +
-          `${JSON.stringify(prepared.state, null, 2)}\n\`\`\``;
-    }
-
     this.impl.ctx.storage.transactionSync(() => {
       for (let record of prepared.records) this.impl.storage.renderUIState.put(record);
       toolCall.output!.stateDefaults = prepared.state;
       toolCall.output!.consumed = true;
       message.timestamp = this.impl.getChatTimestamp();
       this.impl.storage.chats.put(message);
-      this.impl.addChatMessages(chatId, author, [{type: "message", message: submission}]);
+      this.impl.addChatMessages(chatId, GENERATIVE_UI_NOTICE_AUTHOR, [{
+        type: "generativeUiAction",
+        toolCallId,
+        action,
+        state: prepared.state,
+      }]);
     });
     await this.#resumeSuspendedAgent(chatId);
   }

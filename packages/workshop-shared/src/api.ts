@@ -2559,6 +2559,23 @@ export type AiChatMessageBody = {
   generatedBySlashCommandSequence?: number;
 } | {
   /**
+   * A system-side notice that the user submitted a catalog-generated interface. It is deliberately
+   * not a regular user message: `action` originated in model-authored JSX, and `state` is data from
+   * the card. Agent replay frames it as untrusted tool output and Hermes also receives the same
+   * structured payload through its workspace-delta channel.
+   */
+  type: "generativeUiAction";
+
+  /** ID of the durable `renderUI` tool result whose Button was submitted. */
+  toolCallId: string;
+
+  /** Stable action token declared by the submitted Button. */
+  action: string;
+
+  /** Whole submitted state, containing exactly the paths bound by that interface. */
+  state: Record<string, unknown>;
+} | {
+  /**
    * A slash command exactly as requested by the client, retained for display and never included in
    * model context. A gatekeeper command does not itself start an agent turn -- the prompt it expands
    * to arrives as a separate `message`. A built-in command is handled by the Workshop, and this

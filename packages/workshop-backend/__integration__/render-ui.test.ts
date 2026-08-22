@@ -12,6 +12,7 @@ import {
   executeRenderUI,
   MAX_RENDER_UI_SOURCE_BYTES,
   RENDER_UI_CATALOG_VERSION,
+  validateRenderUINode,
 } from "../src/render-ui";
 import type {OverseerDurableObject} from "../src/overseer";
 
@@ -138,6 +139,42 @@ describe("renderUI Dynamic Worker", () => {
         .rejects.toThrow(/262144-byte tree limit/);
   });
 
+  it("enforces the tree cap in the parent when the isolate stubs TextEncoder", async () => {
+    await expect(executeRenderUI(
+        env.LOADER,
+        `(() => {
+          globalThis.TextEncoder = class { encode() { return {byteLength: 0}; } };
+          return <Stack>{Array.from({length: 280}, () =>
+            <Text>{"y".repeat(1000)}</Text>)}</Stack>;
+        })()`))
+        .rejects.toThrow(/parent-enforced|262144-byte tree limit/);
+  });
+
+  it("authoritatively rejects hostile props and schemas in the parent", async () => {
+    expect(() => validateRenderUINode({
+      type: "Text",
+      props: {dangerouslySetInnerHTML: "<img onerror=alert(1)>", onClick: "javascript:alert(1)"},
+      children: ["hi"],
+    })).toThrow(/forbidden prop.*dangerouslySetInnerHTML/);
+    expect(() => validateRenderUINode({
+      type: "Badge", props: {tone: "sparkly"}, children: [],
+    })).toThrow(/must be one of/);
+
+    await expect(executeRenderUI(env.LOADER, `(() => {
+      const realKeys = Object.keys, realEntries = Object.entries;
+      const evil = {
+        dangerouslySetInnerHTML: {schema: {type: "scalar"}, optional: true},
+        onClick: {schema: {type: "scalar"}, optional: true},
+        label: {schema: {type: "string", maxLength: 4096}, optional: true},
+      };
+      Object.keys = value => value && value.dangerouslySetInnerHTML !== undefined
+        ? [] : realKeys(value);
+      Object.entries = value => value && value.tone && value.strong && value.mono
+        ? realEntries(evil) : realEntries(value);
+      return <Text label="visible" dangerouslySetInnerHTML="bad" onClick="bad">hi</Text>;
+    })()`)).rejects.toThrow(/forbidden prop.*dangerouslySetInnerHTML/);
+  });
+
   it.each([
     `import("cloudflare:workers")`,
     `import.meta.url`,
@@ -145,6 +182,23 @@ describe("renderUI Dynamic Worker", () => {
     `import x from "somewhere"`,
   ])("rejects module access: %s", async (source) => {
     await expect(executeRenderUI(env.LOADER, source)).rejects.toThrow(/cannot (import|call require)/);
+  });
+
+  it("keeps UTF-16 masking aligned around an import expression", async () => {
+    await expect(executeRenderUI(env.LOADER, `(async () => {
+      let padding = "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉";
+      let module = await import("cloudflare:workers");
+      return <Text label={padding + String(module)} />;
+    })()`)).rejects.toThrow(/cannot import/);
+  });
+
+  it("does not scan inert JSX text as executable code", async () => {
+    let result = await executeRenderUI(
+        env.LOADER,
+        `<Text>You can import data, call require(x), or discuss while (true) here.</Text>`);
+    expect(result.tree.children).toEqual([
+      "You can import data, call require(x), or discuss while (true) here.",
+    ]);
   });
 
   it("rejects unknown, mistyped, and non-bindable state paths", async () => {
@@ -157,6 +211,10 @@ describe("renderUI Dynamic Worker", () => {
     await expect(executeRenderUI(
         env.LOADER, `<Text tone={bind("tone")}>Hi</Text>`, {tone: "info"}))
         .rejects.toThrow(/Text\.tone cannot be bound/);
+    await expect(executeRenderUI(
+        env.LOADER, `<Input value={bind("form.name")} />`,
+        {form: {name: "Ada"}, junk: "model-authored"}))
+        .rejects.toThrow(/Unknown renderUI state path "junk"/);
   });
 
   it("terminates an infinite loop at the isolate CPU limit", async () => {
@@ -245,6 +303,19 @@ describe("renderUI durable state and actions", () => {
       output: {stateDefaults: {form: {name: "Grace"}}},
     });
 
+    let reset = await runInDurableObject(native, async (instance) => {
+      let impl = (instance as OverseerDurableObject & {
+        impl: {
+          renderUI(chatId: number, jsx: string, state: Record<string, unknown>):
+              Promise<GenerativeUiResult>;
+        };
+      }).impl;
+      return impl.renderUI(
+          chatId, `<Slider value={bind("form.name")} min={0} max={10} />`,
+          {form: {name: 5}});
+    });
+    expect(reset.stateDefaults).toEqual({form: {name: 5}});
+
     await workspace.submitGenerativeUiAction(
         chatId, "render-call-1", "save", {form: {name: "Grace"}});
     let after = await workspace.getChatHistory(chatId);
@@ -254,9 +325,11 @@ describe("renderUI durable state and actions", () => {
       output: {consumed: true},
     });
     expect(after.messages.at(-1)).toMatchObject({
-      author: {type: "user"},
-      type: "message",
-      message: expect.stringContaining('"name": "Grace"'),
+      author: {type: "gadget", id: "renderUI", name: "Interface submission"},
+      type: "generativeUiAction",
+      toolCallId: "render-call-1",
+      action: "save",
+      state: {form: {name: "Grace"}},
     });
 
     // A debounce that was already queued when submission started is ignored after consumption.
