@@ -119,5 +119,6 @@ export function normalizeGenerativeUiResult(output: unknown): GenerativeUiResult
     // A tree from a catalog this build doesn't know still renders; the version only drives the
     // note the card shows, so an unreadable one is reported as 0 rather than rejected.
     catalogVersion: typeof output.catalogVersion === "number" ? output.catalogVersion : 0,
+    ...(typeof output.consumed === "boolean" ? { consumed: output.consumed } : {}),
   };
 }

@@ -15,6 +15,16 @@ describe("normalizeGenerativeUiResult", () => {
     });
   });
 
+  it("preserves the durable consumed marker across reload normalization", () => {
+    const result = normalizeGenerativeUiResult({
+      tree: { type: "Button", props: { action: "deploy" }, children: ["Deploy"] },
+      stateDefaults: {},
+      catalogVersion: 1,
+      consumed: true,
+    });
+    expect(result?.consumed).toBe(true);
+  });
+
   it("fills in the parts a sparse node leaves out", () => {
     expect(normalizeGenerativeUiResult({ tree: { type: "Divider" } })).toEqual({
       tree: { type: "Divider", props: {}, children: [] },

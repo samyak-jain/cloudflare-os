@@ -483,6 +483,22 @@ describe("submission", () => {
     expect(client.calls).toEqual([]);
   });
 
+  it("renders a reloaded consumed card as submitted even if marked interactive", () => {
+    const client = createRecordingGenerativeUiClient();
+    render(
+      <GenerativeUiCard
+        toolCallId="call-1"
+        result={{ ...result(node("Button", { action: "deploy" }, ["Deploy"])), consumed: true }}
+        client={client}
+        interactive
+      />,
+    );
+    expect(buttonLabelled("Deploy").disabled).toBe(true);
+    expect(container.textContent).toContain("Submitted");
+    buttonLabelled("Deploy").click();
+    expect(client.calls).toEqual([]);
+  });
+
   it("notes a tree built for a catalog this build doesn't have", () => {
     render(
       <GenerativeUiCard

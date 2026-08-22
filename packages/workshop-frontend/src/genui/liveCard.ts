@@ -2,10 +2,9 @@
  * Which recorded interface, if any, the user may still act on.
  *
  * The design's rule is "forms freeze after the turn that consumed their submission", and the
- * transcript already records exactly that: submitting a card feeds an input event into the
- * session, which produces a turn, which appends messages after the card. So liveness needs no
- * extra state on either side -- an interface is live if it is the newest one and nothing has been
- * said since.
+ * transcript already records exactly that: submitting a card appends a generativeUiAction event
+ * even when the resumed agent turn has no prose. An interface is live only while it is the newest
+ * one and no submission or later speech has followed it.
  *
  * The consequences are the ones the design asks for: reloading mid-form gives back a live card,
  * reloading after submitting gives back a frozen one, and scrolling up through a conversation
@@ -29,11 +28,11 @@ export function findLiveGenerativeUiCall(messages: readonly AiChatMessage[]): st
     );
     if (newest) return newest.toolCallId;
 
-    // An interface is only live while it is the last thing in the conversation. Anything *said*
-    // after it -- by the user or by the agent -- has moved past it. The message carrying the call
-    // is itself skipped above, since the agent's own explanation of the form arrives with it, and
-    // an empty assistant message (a turn that only called tools) is bookkeeping, not speech.
-    if (message.type === "slashCommand") return null;
+    // A submission is terminal even if resuming the agent produces no prose. Otherwise an
+    // interface is live until something is said after it. The message carrying the call is skipped
+    // above because the agent's own explanation of the form arrives with it; an empty assistant
+    // message (a turn that only called tools) is bookkeeping, not speech.
+    if (message.type === "slashCommand" || message.type === "generativeUiAction") return null;
     if (message.type === "message" && message.message.trim() !== "") return null;
   }
   return null;

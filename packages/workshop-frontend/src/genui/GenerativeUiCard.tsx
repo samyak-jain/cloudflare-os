@@ -173,7 +173,7 @@ export function GenerativeUiCard({
     toolCallId,
     stateDefaults: result.stateDefaults,
     client,
-    interactive: interactive && client !== null,
+    interactive: interactive && result.consumed !== true && client !== null,
   });
 
   const ctx: CatalogContext = useMemo(() => ({
@@ -183,7 +183,8 @@ export function GenerativeUiCard({
     pendingAction: status.kind === "submitting" ? status.action : null,
   }), [frozen, setBound, submit, status]);
 
-  const submitted = status.kind === "submitted" || status.kind === "submitting";
+  const submitted = result.consumed === true ||
+    status.kind === "submitted" || status.kind === "submitting";
 
   // At most one footer, so a card that is both historical and from a newer catalog doesn't grow a
   // stack of disclaimers taller than the interface itself.

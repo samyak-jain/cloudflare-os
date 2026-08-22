@@ -33,6 +33,19 @@ function message(
   };
 }
 
+function submittedAction(): AiChatMessage {
+  return {
+    chatId: 1,
+    sequence: sequence++,
+    timestamp: new Date(0),
+    author: USER,
+    type: "generativeUiAction",
+    toolCallId: "call-1",
+    action: "deploy",
+    state: {environment: "staging"},
+  };
+}
+
 describe("findLiveGenerativeUiCall", () => {
   it("finds nothing in a chat with no interfaces", () => {
     expect(findLiveGenerativeUiCall([message(USER, "hi"), message(AGENT, "hello")])).toBeNull();
@@ -68,6 +81,15 @@ describe("findLiveGenerativeUiCall", () => {
       message(AGENT, ""),
     ];
     expect(findLiveGenerativeUiCall(messages)).toBe("call-1");
+  });
+
+  it("keeps a submitted card frozen after reload even if the resumed turn is empty", () => {
+    const messages = [
+      message(AGENT, "Which environment?", [renderUiCall("call-1")]),
+      submittedAction(),
+      message(AGENT, ""),
+    ];
+    expect(findLiveGenerativeUiCall(messages)).toBeNull();
   });
 
   it("takes the newest of several interfaces in one turn", () => {
