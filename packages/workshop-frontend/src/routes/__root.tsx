@@ -1,11 +1,11 @@
 import { logRpcFailure } from '../rpcErrors'
 import { useState, useEffect } from 'react'
-import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
+import { createRootRoute, Navigate, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
-import { useAuth, CF_ACCESS_MODE } from '../useAuth'
+import { useAuth } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
 import { FeatureFlagsProvider } from '../FeatureFlagsContext'
 import Header from '../components/Header'
@@ -31,7 +31,7 @@ function RootComponent() {
   // A standalone (no app shell) render is used only for signed-out visitors of public routes.
   // Signed-in users get the full app chrome so public pages (esp. the blueprint detail) feel
   // native — sidebar and all — instead of floating on a bare page.
-  const standalone = isSignup || (isBlueprint && !isAuthenticated)
+  const standalone = !isAuthenticated && (isSignup || isBlueprint)
 
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
   // here so the chrome doesn't flash in during the redirect to /workspace/.
@@ -45,13 +45,19 @@ function RootComponent() {
   }
 
   // Loading state
-  if (isLoading && !standalone) {
+  if (isLoading) {
     return (
       <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
         <p className="text-sm text-kumo-subtle">{connectionLost ? 'Waiting for server…' : 'Loading...'}</p>
       </div>
     )
+  }
+
+  // A direct /signup load must wait for the runtime Access attempt above. Once Access succeeds,
+  // never render the app's signup UI, even transiently.
+  if (isSignup && isAuthenticated) {
+    return <Navigate to="/" replace />
   }
 
   // Auth error
@@ -65,16 +71,6 @@ function RootComponent() {
         >
           Retry
         </button>
-      </div>
-    )
-  }
-
-  // CF Access mode: show spinner while pipelined auth resolves
-  if (!isAuthenticated && CF_ACCESS_MODE && !standalone) {
-    return (
-      <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">Authenticating...</p>
       </div>
     )
   }

@@ -17,19 +17,28 @@ vi.mock('./errorReporting', () => ({
 
 const person: AiChatAuthorInfo = { type: 'user', id: 'person@example.com', name: 'Person' }
 
-/** A public API whose authenticated stub resolves `whoami` to `author`, or rejects without one. */
-function stubPublicApi(author?: AiChatAuthorInfo): RpcStub<PublicApi> {
-  const authenticated = {
+/** A public API with optional ordinary-session and Access identities. */
+function stubPublicApi(
+  author?: AiChatAuthorInfo,
+  accessAuthor?: AiChatAuthorInfo,
+): RpcStub<PublicApi> {
+  const stubFor = (identity?: AiChatAuthorInfo) => ({
     whoami: async () => {
-      if (!author) throw new Error('session gone')
-      return author
+      if (!identity) throw new Error('not authenticated')
+      return identity
     },
     amIAdmin: async () => false,
     [Symbol.dispose]: () => {},
-  }
+  })
   return {
-    authenticate: () => authenticated,
-    authenticateFromCfAccess: () => authenticated,
+    authenticate: () => {
+      if (!author) throw new Error('not authenticated')
+      return stubFor(author)
+    },
+    authenticateFromCfAccess: () => {
+      if (!accessAuthor) throw new Error('Access is off')
+      return stubFor(accessAuthor)
+    },
   } as unknown as RpcStub<PublicApi>
 }
 
@@ -52,7 +61,10 @@ function deferredPublicApi(): {
     return { whoami: () => pending, [Symbol.dispose]: () => {} }
   }
   return {
-    api: { authenticate, authenticateFromCfAccess: authenticate } as unknown as RpcStub<PublicApi>,
+    api: {
+      authenticate,
+      authenticateFromCfAccess: () => { throw new Error('Access is off') },
+    } as unknown as RpcStub<PublicApi>,
     release: (nth, author) => releases[nth](author),
   }
 }
@@ -112,17 +124,57 @@ describe('useAuth error reporting identity', () => {
     expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
   })
 
-  it('names the user when CF Access authenticates without a token', async () => {
-    vi.stubEnv('VITE_CF_ACCESS_MODE', 'true')
-    vi.resetModules()
-    // Both imports must come from the reset registry, or the assertion would watch a mock instance
-    // that the freshly imported hook never calls.
-    const { setReportedUserId: setId } = await import('./errorReporting')
-    const { useAuth: cfAccessUseAuth } = await import('./useAuth')
+  it('names the user when Access authenticates without an app token', async () => {
+    await mount(stubPublicApi(undefined, person))
 
-    await mount(stubPublicApi(person), cfAccessUseAuth)
+    expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  })
 
-    expect(setId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  it('discards a stale stored app session when Access succeeds', async () => {
+    localStorage.setItem('authToken', 'stale-token')
+    const authenticate = vi.fn<(token: string) => void>()
+    const api = {
+      authenticateFromCfAccess: () => ({
+        whoami: async () => person,
+        [Symbol.dispose]: () => {},
+      }),
+      authenticate,
+    } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBeNull()
+  })
+
+  it('attempts Access before a stored app session', async () => {
+    const calls: string[] = []
+    localStorage.setItem('authToken', 'stored-token')
+    const api = {
+      authenticateFromCfAccess: () => {
+        calls.push('access')
+        throw new Error('Access is off')
+      },
+      authenticate: () => {
+        calls.push('session')
+        return {
+          whoami: async () => person,
+          [Symbol.dispose]: () => {},
+        }
+      },
+    } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+
+    expect(calls).toEqual(['access', 'session'])
+    expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  })
+
+  it('falls back to the signed-out state when Access is unavailable', async () => {
+    await mount(stubPublicApi())
+
+    expect(setReportedUserId).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBeNull()
   })
 
   it('keeps the identity when one instance unmounts while another stays mounted', async () => {

@@ -3,7 +3,6 @@ import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
 import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
-import { CF_ACCESS_MODE } from './useAuth'
 import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phosphor-icons/react'
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
@@ -382,8 +381,8 @@ export default function SettingsPage() {
         {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
         <UsageSettings />
 
-        {/* Security — only for password accounts (hidden under CF Access or gatekeeper sign-in) */}
-        {!CF_ACCESS_MODE && hasPassword === true && (
+        {/* Security — only for accounts that have a password credential */}
+        {hasPassword === true && (
           <section className="flex flex-col gap-3">
             <SectionLabel>Security</SectionLabel>
             <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
