@@ -318,29 +318,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  /**
-   * Returns true when this login created the account on first use. When the account doesn't yet
-   * exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
-   * existing users can still sign in.
-   */
-  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) {
-        throw new Error("New sign-ups are currently disabled on this deployment.");
-      }
-      // Create on first use.
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
-      return true;
-    }
-
-    return false;
-  }
-
   async #newSessionToken(): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);
@@ -413,7 +390,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+  async #loginOrCreateFromVerifiedEmail(
+      email: string,
+      allowCreate: boolean): Promise<{ secret: string; accountCreated: boolean } | null> {
+    let accountCreated = false;
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
@@ -422,8 +402,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         name: email.split("@")[0],
         id: email,
       });
+      accountCreated = true;
     }
-    return this.#newSessionToken();
+    return { secret: await this.#newSessionToken(), accountCreated };
+  }
+
+  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+    return (await this.#loginOrCreateFromVerifiedEmail(email, allowCreate))?.secret ?? null;
+  }
+
+  /**
+   * Establishes a normal app session for a signature-verified Cloudflare Access email. Access is
+   * the deployment's signup policy, so first use always provisions the email-keyed account with
+   * no password credential at all (stronger than an unknown random password: every password login
+   * fails); subsequent uses mint another ordinary stored session for the same account.
+   */
+  async loginOrCreateViaAccess(
+      email: string): Promise<{ secret: string; accountCreated: boolean }> {
+    return (await this.#loginOrCreateFromVerifiedEmail(email, true))!;
   }
 
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */

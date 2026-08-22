@@ -40,8 +40,8 @@ function setup() {
 }
 
 const accessEnv = {
-  CF_ACCESS_AUD: "workshop-audience",
-  CF_ACCESS_ISS: "https://team.cloudflareaccess.com",
+  ACCESS_APP_AUD: "workshop-audience",
+  ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
 };
 
 describe("handleClientErrorRequest", () => {

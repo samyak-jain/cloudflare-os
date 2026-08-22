@@ -4,11 +4,12 @@ import {
 } from "@gadgets/error-reporting";
 import type { ErrorEventV1, ErrorReporter } from "@gadgets/backend-utils/error-reporting";
 import { createLogger } from "@gadgets/backend-utils/logger";
-import type { JWTPayload } from "jose";
 import {
   accessRateLimitKey,
+  hasAccessConfiguration,
   verifyCfAccessJwt,
-  type CfAccessEnv,
+  type AccessEnv,
+  type AccessJwtPayload,
 } from "./access.js";
 
 // The bounded string fields can expand when encoded as UTF-8 or JSON escapes.
@@ -21,13 +22,13 @@ const logger = createLogger<ClientErrorLogFields>({ component: "workshop.client-
 export type ClientErrorEnv = Readonly<{
   FRONTEND_ERROR_REPORTER?: Pick<ErrorReporter, "report">;
   FRONTEND_ERROR_RATE_LIMITER?: Pick<RateLimit, "limit">;
-}> & CfAccessEnv;
+}> & AccessEnv;
 
 type WaitUntilContext = Pick<ExecutionContext, "waitUntil">;
 type AccessVerifier = (
   request: Request,
-  env: CfAccessEnv,
-) => Promise<JWTPayload | null>;
+  env: AccessEnv,
+) => Promise<AccessJwtPayload | null>;
 
 async function readBoundedJson(request: Request): Promise<unknown | "too-large" | "invalid"> {
   const declaredLength = Number(request.headers.get("content-length"));
@@ -112,7 +113,7 @@ export async function handleClientErrorRequest(
 
   try {
     let key: string;
-    if (env.CF_ACCESS_AUD) {
+    if (hasAccessConfiguration(env)) {
       const payload = await verifyAccess(request, env);
       if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
       const accessKey = await accessRateLimitKey(payload);

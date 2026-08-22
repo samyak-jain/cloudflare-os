@@ -15,6 +15,12 @@ export default defineConfig({
     capnwebValidate(),
     cloudflareTest({
       main: "./src/server.ts",
+      miniflare: {
+        bindings: {
+          ACCESS_APP_AUD: "workshop-test-audience",
+          ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com",
+        },
+      },
       remoteBindings: false,
       wrangler: {
         configPath: "./wrangler.jsonc",
