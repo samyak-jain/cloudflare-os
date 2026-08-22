@@ -138,7 +138,11 @@ export class AccessCertCache {
   readonly #refreshes = new Map<string, Promise<CachedCerts>>();
 
   constructor(options: AccessCertCacheOptions = {}) {
-    this.#fetcher = options.fetcher ?? fetch;
+    // The global fetch must keep its `this` bound to the global scope. Storing the bare reference and
+    // later calling it as `this.#fetcher(...)` rebinds `this` to this instance, which workerd rejects
+    // with "Illegal invocation" at runtime. Tests inject their own fetcher and never hit this path, so
+    // bind the default explicitly.
+    this.#fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
     this.#now = options.now ?? Date.now;
   }
 

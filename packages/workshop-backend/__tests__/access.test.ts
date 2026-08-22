@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AccessCertCache,
   accessRateLimitKey,
@@ -41,6 +41,10 @@ beforeAll(async () => {
 
 beforeEach(() => {
   resetAccessConfigurationErrorsForTest();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 function base64Url(value: string | ArrayBuffer): string {
@@ -92,6 +96,22 @@ async function verify(assertion: string, cache: AccessCertCache) {
 }
 
 describe("Cloudflare Access JWT verification", () => {
+  it("binds the default fetcher to the workerd global scope", async () => {
+    // workerd's native fetch throws the same error when called with another receiver. Use a strict
+    // double so this remains a deterministic regression test even in runtimes with permissive fetch.
+    const defaultFetcher = vi.fn<typeof fetch>(function(this: unknown) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation: incorrect `this` reference");
+      return Promise.resolve(Response.json({ keys: [firstKey.jwk] }, {
+        headers: { "cache-control": "max-age=3600" },
+      }));
+    });
+    vi.stubGlobal("fetch", defaultFetcher);
+    const cache = new AccessCertCache({ now: () => NOW_MS });
+
+    await expect(verify(await token(), cache)).resolves.not.toBeNull();
+    expect(defaultFetcher).toHaveBeenCalledOnce();
+  });
+
   it("accepts a valid RS256 assertion and an audience array containing the configured AUD", async () => {
     const { cache, fetcher } = certCache([firstKey.jwk]);
     const assertion = await token({ claims: { aud: ["another-app", accessEnv.ACCESS_APP_AUD] } });
