@@ -89,6 +89,7 @@ import {
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { AvatarController, ChatAvatar, ChatAvatarStatus } from "./avatar";
+import { useServerConfig } from "./ServerConfigContext";
 import {
   ComposingUiCard,
   createOverseerGenerativeUiClient,
@@ -5095,6 +5096,10 @@ function ChatInterface({
   const avatarController = avatarControllerRef.current;
   useEffect(() => () => avatarControllerRef.current?.destroy(), []);
 
+  // Deployment feature flag (FEATURE_CHAT_AVATAR). When off, the chat headers keep their original
+  // pre-avatar height; the controller still runs so flipping the flag needs no other changes.
+  const chatAvatarEnabled = useServerConfig()?.chatAvatarEnabled ?? false;
+
   // Follow the viewed chat, so a previous conversation's tail never bleeds into a new one.
   useEffect(() => {
     avatarController.setChat(selectedChatId);
@@ -7392,13 +7397,19 @@ function ChatInterface({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
           {sidebarMode && (
-            <div className="flex h-[104px] flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
+            <div
+              className={`flex ${chatAvatarEnabled ? "h-[104px]" : "h-12"} flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4`}
+            >
               {/* Same avatar, same controller; in sidebar mode this bar is the chat's only chrome. */}
-              <ChatAvatar controller={avatarController} size={96} />
-              <ChatAvatarStatus
-                controller={avatarController}
-                className="mb-4 self-end truncate text-[11px] leading-4 text-kumo-inactive"
-              />
+              {chatAvatarEnabled && (
+                <>
+                  <ChatAvatar controller={avatarController} size={96} />
+                  <ChatAvatarStatus
+                    controller={avatarController}
+                    className="mb-4 self-end truncate text-[11px] leading-4 text-kumo-inactive"
+                  />
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => setSidebarActiveTab("chat")}
@@ -7436,7 +7447,9 @@ function ChatInterface({
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
               {!sidebarMode && (
-                <div className="flex h-[104px] flex-shrink-0 items-center justify-between gap-3 border-b border-kumo-line px-4">
+                <div
+                  className={`flex ${chatAvatarEnabled ? "h-[104px]" : "h-12"} flex-shrink-0 items-center justify-between gap-3 border-b border-kumo-line px-4`}
+                >
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
                     className="!h-8 !w-8 flex-shrink-0"
@@ -7450,7 +7463,9 @@ function ChatInterface({
                     Lena. A view of the turn stream, sized at the 96 px RIG.md §5 calls "still
                     comfortable" -- the smallest at which the mouth still reads as a shape.
                   */}
-                  <ChatAvatar controller={avatarController} size={96} />
+                  {chatAvatarEnabled && (
+                    <ChatAvatar controller={avatarController} size={96} />
+                  )}
 
                   {isEditingTitle ? (
                     <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -7492,10 +7507,12 @@ function ChatInterface({
                           What the avatar is showing, in words. Subscribes on its own so a turn's
                           state changes never re-render this component -- see ChatAvatarStatus.
                         */}
-                        <ChatAvatarStatus
-                          controller={avatarController}
-                          className="truncate text-[11px] leading-4 text-kumo-inactive"
-                        />
+                        {chatAvatarEnabled && (
+                          <ChatAvatarStatus
+                            controller={avatarController}
+                            className="truncate text-[11px] leading-4 text-kumo-inactive"
+                          />
+                        )}
                       </div>
                       <WorkshopIconButton
                         onClick={() => setIsEditingTitle(true)}

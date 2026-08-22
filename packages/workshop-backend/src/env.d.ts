@@ -82,6 +82,10 @@ declare global {
       // Enables the Cloudflare free-tier limits + top-up flow when set to "true".
       ENABLE_CLOUDFLARE_LIMITS?: string;
 
+      // Renders the animated chat avatar when set to "true". Hidden by default while the
+      // character art is reworked.
+      FEATURE_CHAT_AVATAR?: string;
+
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
