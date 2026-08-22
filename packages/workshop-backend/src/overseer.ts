@@ -6416,9 +6416,31 @@ class OverseerImpl implements AgentHooks {
   }
 
   async claimHermesToolCall(
-      chatId: number, turnId: string, callId: string, toolName: string, sessionId: string):
+      chatId: number, turnId: string, callId: string, toolName: string, sessionId: string,
+      signal: AbortSignal):
       Promise<{execute: true} | {execute: false, result: HermesToolResult}> {
-    return this.#hermesToolCalls.claim(chatId, sessionId, turnId, callId, toolName);
+    let outcome:
+        Promise<{execute: true} | {execute: false, result: HermesToolResult}> | undefined;
+    this.ctx.storage.transactionSync(() => {
+      if (signal.aborted) {
+        let message = "local execution aborted";
+        let result = this.#hermesToolCalls.interruptUnclaimed(
+          chatId, sessionId, turnId, callId, toolName, {
+            result: message,
+            isError: true,
+            content: [{type: "text", text: message}],
+          },
+        );
+        outcome = Promise.resolve({execute: false, result});
+      } else {
+        // `claim()` performs every fresh-row write synchronously before its promise is returned.
+        // The DO input gate and this transaction therefore order cancellation observation with
+        // the executing-row commit; an abort cannot interleave between this check and that write.
+        outcome = this.#hermesToolCalls.claim(chatId, sessionId, turnId, callId, toolName);
+      }
+    });
+    if (!outcome) throw new Error("Hermes tool claim transaction did not run.");
+    return outcome;
   }
 
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void {

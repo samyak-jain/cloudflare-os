@@ -39,6 +39,7 @@ export interface HermesDriverHooks {
     callId: string,
     toolName: string,
     sessionId: string,
+    signal: AbortSignal,
   ): Promise<{ execute: true } | { execute: false; result: HermesToolResult }>;
   resolveToolCall(turnId: string, callId: string, result: HermesToolResult): void;
   interruptToolCall(turnId: string, callId: string, result: HermesToolResult): void;
@@ -327,6 +328,14 @@ function resultText(content: ToolResultMessage["content"]): string {
   return content
     .map((part) => (part.type === "text" ? part.text : `[image result: ${part.mimeType}]`))
     .join("\n");
+}
+
+function abortedToolResult(): HermesToolResult {
+  return {
+    result: "local execution aborted",
+    isError: true,
+    content: [{type: "text", text: "local execution aborted"}],
+  };
 }
 
 /**
@@ -669,7 +678,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               if (!turnId) throw new HermesProtocolError("Hermes tool call has no turn id.");
               let toolTurnId = turnId;
               let claimPromise = options.hooks.claimToolCall(
-                toolTurnId, callId, call.name, sessionId,
+                toolTurnId, callId, call.name, sessionId, options.signal,
               );
               let claimAbort = Promise.withResolvers<"aborted">();
               let claimAbortListener = () => claimAbort.resolve("aborted");
@@ -682,6 +691,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               options.signal.removeEventListener("abort", claimAbortListener);
               if (claimed.kind === "aborted") return;
               let claim = claimed.claim;
+              if (options.signal.aborted) {
+                if (claim.execute) {
+                  options.hooks.interruptToolCall(toolTurnId, callId, abortedToolResult());
+                }
+                return;
+              }
               let stored: HermesToolResult;
               if (claim.execute) {
                 let tool = toolsByName.get(call.name);
@@ -691,6 +706,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                   toolName: call.name,
                   args: block.arguments,
                 });
+                // Emission is awaited and can deliver cancellation. This is the final fence before
+                // the immediately-invoked execution promise starts the non-cancellable mutation.
+                if (options.signal.aborted) {
+                  options.hooks.interruptToolCall(toolTurnId, callId, abortedToolResult());
+                  return;
+                }
                 let execution = (async (): Promise<HermesToolResult> => {
                   try {
                     if (!tool) throw new Error(`Tool ${call.name} not found`);

@@ -78,6 +78,33 @@ export class HermesToolCallStateMachine {
     return { execute: true };
   }
 
+  /** Persist a terminal cancellation only when no execution claim exists yet. */
+  interruptUnclaimed(
+    chatId: number,
+    sessionId: string,
+    turnId: string,
+    callId: string,
+    toolName: string,
+    result: HermesToolResult,
+  ): HermesToolResult {
+    let key = hermesToolCallKey(turnId, callId);
+    let previous = this.records.get(key);
+    if (previous && previous.toolName !== toolName) {
+      throw new Error("Hermes reused a call id with a different tool name.");
+    }
+    if (previous?.state === "resolved" || previous?.state === "interrupted") {
+      return previous.result;
+    }
+    // A pre-existing executing claim may already own an in-flight side effect. Its owner must
+    // finish and resolve it; a cancelled duplicate delivery must not overwrite that outcome.
+    if (!previous) {
+      this.records.put({
+        chatId, sessionId, turnId, callId, toolName, state: "interrupted", result,
+      });
+    }
+    return result;
+  }
+
   /** Atomically replace an executing claim with its reusable result and release race waiters. */
   resolve(turnId: string, callId: string, result: HermesToolResult): void {
     let key = hermesToolCallKey(turnId, callId);

@@ -179,6 +179,21 @@ Round-three validation:
   whose reset-flag behavior is explicitly untestable locally. The Hermes driver/wake coverage is
   included in those green workspace results.
 
+## Phase 7 — final abort-boundary fix (complete)
+
+The round-four cancellation race is closed at the durable claim boundary. The abort signal is
+checked inside the same synchronous Durable Object storage transaction that writes a fresh claim:
+an observed cancellation writes an `interrupted` result directly, while an accepted claim writes
+`executing` before the transaction returns. The driver also fences after the awaited
+`tool_execution_start` emission, so cancellation cannot interleave between the final check and the
+immediate tool invocation. An exact regression aborts during `toolcall_end` projection and asserts
+zero executions, an interrupted result, no result POST, and no later event consumption. A real
+Overseer test verifies the persisted interrupted row.
+
+Final validation: focused driver/state tests 31/31; real workerd integration 12 passed with the same
+4 documented local skips; Workshop backend 523/523; all 24 workspace test tasks passed; backend
+build and repository lint passed with pre-existing warning-level diagnostics only.
+
 ## Remaining
 
 - Hermes implementation is committed in `b20ac29` (schema fixtures), `1b48d00` (initial provider

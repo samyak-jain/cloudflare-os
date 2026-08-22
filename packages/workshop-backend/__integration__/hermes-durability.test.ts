@@ -28,6 +28,7 @@ type OverseerProbe = {
     };
     claimHermesToolCall(
       chatId: number, turnId: string, callId: string, toolName: string, sessionId: string,
+      signal: AbortSignal,
     ): Promise<{execute: true} | {execute: false; result: HermesToolResult}>;
     resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
     recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void;
@@ -80,6 +81,7 @@ describe("Hermes durability in the real Overseer Durable Object", () => {
       let overseer = impl(instance);
       let first = await overseer.claimHermesToolCall(
         7, "turn-race", "call-race", "writeFile", "session-1",
+        new AbortController().signal,
       );
       expect(first).toEqual({execute: true});
       expect(overseer.storage.hermesToolResults.get(
@@ -90,6 +92,7 @@ describe("Hermes durability in the real Overseer Durable Object", () => {
     let duplicate = runInDurableObject(stub, instance =>
       impl(instance).claimHermesToolCall(
         7, "turn-race", "call-race", "writeFile", "session-1",
+        new AbortController().signal,
       ));
     await new Promise(resolve => setTimeout(resolve, 10));
     await runInDurableObject(stub, instance => {
@@ -98,16 +101,39 @@ describe("Hermes durability in the real Overseer Durable Object", () => {
     await expect(duplicate).resolves.toEqual({execute: false, result: RESULT});
   });
 
+  it("atomically records an observed pre-claim abort without granting execution", async () => {
+    let id = exports.OverseerDurableObject.newUniqueId();
+    await runInDurableObject(exports.OverseerDurableObject.get(id), async instance => {
+      let overseer = impl(instance);
+      let controller = new AbortController();
+      controller.abort();
+      await expect(overseer.claimHermesToolCall(
+        7, "turn-abort", "call-abort", "writeFile", "session-1", controller.signal,
+      )).resolves.toMatchObject({
+        execute: false,
+        result: {isError: true, result: "local execution aborted"},
+      });
+      expect(overseer.storage.hermesToolResults.get(
+        hermesToolCallKey("turn-abort", "call-abort"),
+      )).toMatchObject({
+        state: "interrupted",
+        result: {isError: true, result: "local execution aborted"},
+      });
+    });
+  });
+
   it("turns an executeCode claim interrupted after object restart instead of replaying it", async () => {
     let id = exports.OverseerDurableObject.newUniqueId();
     await runInDurableObject(exports.OverseerDurableObject.get(id), instance =>
       impl(instance).claimHermesToolCall(
         7, "turn-crash", "call-code", "executeCode", "session-1",
+        new AbortController().signal,
       ));
     await abortAllDurableObjects();
     await runInDurableObject(exports.OverseerDurableObject.get(id), async instance => {
       await expect(impl(instance).claimHermesToolCall(
         7, "turn-crash", "call-code", "executeCode", "session-1",
+        new AbortController().signal,
       )).resolves.toMatchObject({
         execute: false,
         result: {isError: true, result: "execution state unknown after crash"},
@@ -126,6 +152,7 @@ describe("Hermes durability in the real Overseer Durable Object", () => {
       overseer.recordHermesTurnStarted(7, "turn-old", "session-old");
       await overseer.claimHermesToolCall(
         7, "turn-old", "call-code", "executeCode", "session-old",
+        new AbortController().signal,
       );
       overseer.recordHermesTurnStarted(7, "turn-new", "session-new");
       expect(overseer.storage.hermesToolResults.get(

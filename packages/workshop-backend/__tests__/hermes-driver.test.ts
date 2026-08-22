@@ -723,6 +723,66 @@ describe("Hermes remote driver", () => {
     });
   });
 
+  it("does not start a tool when cancellation arrives during toolcall_end projection", async () => {
+    let server = new FakeHermesServer([
+      {seq: 1, event: "turn.started"},
+      {seq: 2, event: "message.start"},
+      {seq: 3, event: "tool_call.start", call_id: "call-cancel-race", name: "readFile"},
+      {
+        seq: 4, event: "tool_call.end", call_id: "call-cancel-race",
+        arguments: {filename: "a"},
+      },
+      {seq: 5, event: "text.delta", delta: "must not be consumed"},
+      {seq: 6, event: "turn.end", status: "completed", stop_reason: "stop"},
+    ]);
+    let controller = new AbortController();
+    let execute = vi.fn(async () => ({content: [{type: "text" as const, text: "wrong"}]}));
+    let run = harness(server);
+    let baseEmit = run.hooks.emit;
+    run.hooks.emit = async event => {
+      await baseEmit(event);
+      if (
+        event.type === "message_update" &&
+        event.assistantMessageEvent.type === "toolcall_end"
+      ) {
+        controller.abort();
+      }
+    };
+    run.hooks.claimToolCall = async (turnId, callId, _toolName, _sessionId, signal) => {
+      if (signal.aborted) {
+        let result: HermesToolResult = {
+          result: "local execution aborted",
+          isError: true,
+          content: [{type: "text", text: "local execution aborted"}],
+        };
+        run.stored.set(`${turnId}.${callId}`, result);
+        return {execute: false, result};
+      }
+      return {execute: true};
+    };
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "cancel-at-tool-boundary",
+      inputText: "cancel",
+      tools: [tool(execute)],
+      signal: controller.signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(run.stored.get("turn-1.call-cancel-race")).toMatchObject({
+      result: "local execution aborted", isError: true,
+    });
+    expect(server.toolResults).toEqual([]);
+    expect(run.events.some(event =>
+      event.type === "message_update" &&
+      event.assistantMessageEvent.type === "text_delta",
+    )).toBe(false);
+  });
+
   it("cancels a silent SSE immediately when the user aborts", async () => {
     let encoder = new TextEncoder();
     let controller = new AbortController();

@@ -320,6 +320,7 @@ export interface AgentHooks {
   /** Durably claim and resolve a `(turn_id, call_id)` execution before/after local work. */
   claimHermesToolCall(
     chatId: number, turnId: string, callId: string, toolName: string, sessionId: string,
+    signal: AbortSignal,
   ):
       Promise<{execute: true} | {execute: false, result: HermesToolResult}>;
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
@@ -3069,8 +3070,8 @@ export async function runAgent(
             emit: event => emit(event),
             emitTerminal: (turnId, sequence, event) =>
               emit(event, {turnId, sequence}),
-            claimToolCall: (turnId, callId, toolName, sessionId) =>
-              hooks.claimHermesToolCall(chatId, turnId, callId, toolName, sessionId),
+            claimToolCall: (turnId, callId, toolName, sessionId, signal) =>
+              hooks.claimHermesToolCall(chatId, turnId, callId, toolName, sessionId, signal),
             resolveToolCall: (turnId, callId, result) =>
               hooks.resolveHermesToolCall(turnId, callId, result),
             interruptToolCall: (turnId, callId, result) =>
