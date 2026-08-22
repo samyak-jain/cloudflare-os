@@ -1694,6 +1694,13 @@ export async function runAgent(
                 case "requestConnection":
                   toolOutput = {text: toolCall.output ?? ""};
                   break;
+                case "renderUI":
+                  // The validated tree, as the live tool returned it. Replaying the *tree* rather
+                  // than the JSX the model wrote is deliberate: the sandbox may have rejected or
+                  // normalized parts of it, and what the user saw is what the agent should
+                  // remember composing. See the renderUI tool implementation.
+                  toolOutput = {text: jsonToolResultText(toolCall.output ?? {})};
+                  break;
                 default:
                   toolCall satisfies never;
                   throw new Error("Unknown tool.");

@@ -52,6 +52,7 @@ import {
   Question,
   ArrowUpRight,
   Blueprint,
+  Layout,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -84,9 +85,19 @@ import {
   MessageFormatRef,
   OutputIcon,
   OutputFormatOffer,
+  isWorkshopToolName,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { AvatarController, ChatAvatar, ChatAvatarStatus } from "./avatar";
+import {
+  ComposingUiCard,
+  createOverseerGenerativeUiClient,
+  findLiveGenerativeUiCall,
+  GenerativeUiCard,
+  normalizeGenerativeUiResult,
+  UnreadableUiCard,
+} from "./genui";
+import { RemoteToolCard } from "./components/chat/RemoteToolCard";
 import { useConnectionLost } from "./RpcContext";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
@@ -793,6 +804,10 @@ function getToolCallSummary(
       return { verb: "Listed connectable resources", target: tc.input.vendorId };
     case "requestConnection":
       return { verb: "Requested connection", target: tc.input.vendorId };
+    // Only a *failed* renderUI reaches a summary row; a successful one is a card of its own (see
+    // transcriptToolCalls), so there is nothing useful to name as a target here.
+    case "renderUI":
+      return { verb: "Composed an interface" };
   }
   // Compile-time exhaustiveness check.
   const _exhaustive: never = tc;
@@ -872,6 +887,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Listed connectable resources`;
     case "requestConnection":
       return count === 1 ? "Requested a connection" : `Requested ${count} connections`;
+    case "renderUI":
+      return count === 1 ? "Composed an interface" : `Composed ${count} interfaces`;
   }
   const _exhaustive: never = toolName;
   return _exhaustive;
@@ -901,6 +918,8 @@ function getToolIcon(
       return LinkSimple;
     case "createGadget":
       return Plus;
+    case "renderUI":
+      return Layout;
     case "listBlueprints":
       return Blueprint;
     case "observeUserChanges":
@@ -930,6 +949,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Saving resource";
     case "createGadget":
       return "Creating gadget";
+    case "renderUI":
+      return "Composing interface";
     case "executeCode":
       return "Running code";
     case "webFetch":
@@ -958,6 +979,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "setGadgetBinding": return "Wiring up";
     case "saveCapsuleAsBinding": return "Saving";
     case "createGadget": return "Creating gadget";
+    case "renderUI": return "Composing interface";
     case "executeCode": return "Running code";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
@@ -984,6 +1006,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
     case "createGadget": return `Creating ${pluralize(count, "gadget")}`;
+    case "renderUI": return `Composing ${pluralize(count, "interface")}`;
     case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
     case "giveUp": return "Stopping";
     case "listBlueprints": return "Listing blueprints";
@@ -3947,10 +3970,23 @@ function DiscardPendingChangesPopover({
 
 // Collapse adjacent work rows; fold trailing work into the preceding assistant
 // message so one turn reads as one tool/resource run.
+/**
+ * A tool call the transcript draws as a card of its own, so the collapsed work row skips it.
+ *
+ * Two kinds: an interface the agent composed (rendered by the generative-UI module), and a call to
+ * a tool this build doesn't own at all (see `RemoteToolCard`). A failed `renderUI` is neither --
+ * there is no interface to show, so it stays in the work row with its error like any other tool.
+ */
+function isSelfCardingToolCall(tc: AiToolCall): boolean {
+  if (!isWorkshopToolName(tc.toolName)) return true;
+  return tc.toolName === "renderUI" && tc.output !== undefined && !tc.error;
+}
+
 function transcriptToolCalls(toolCalls: AiToolCall[]): AiToolCall[] {
   // Successful creations render as cards; failed calls retain their error summary.
   return toolCalls.filter((tc) =>
-    tc.toolName !== "createGadget" || tc.output === undefined || Boolean(tc.error));
+    !isSelfCardingToolCall(tc) &&
+    (tc.toolName !== "createGadget" || tc.output === undefined || Boolean(tc.error)));
 }
 
 export function buildChatDisplayEntries(
@@ -5113,7 +5149,15 @@ function ChatInterface({
   const currentHasUserDraftRows =
     currentRowBuffer !== null && currentRowBuffer.rows.some(row => row.submission !== undefined);
 
-  const provisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
+  const allProvisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
+  // Streaming counterpart of isSelfCardingToolCall: an interface being composed and a remote tool
+  // being run each get their own card while they stream, and stay out of the collapsed work row.
+  const provisionalToolCalls = allProvisionalToolCalls.filter(
+    (tc) => tc.toolName === null || (isWorkshopToolName(tc.toolName) && tc.toolName !== "renderUI"),
+  );
+  const provisionalSelfCardingCalls = allProvisionalToolCalls.filter(
+    (tc) => tc.toolName !== null && (!isWorkshopToolName(tc.toolName) || tc.toolName === "renderUI"),
+  );
   const useConstrainedChatWidth = sidebarMode || constrainChatWidth;
 
   const currentStreamingActiveFile = currentProvisionalState?.activeEditingFile;
@@ -5189,7 +5233,7 @@ function ChatInterface({
     (currentProvisionalState.text !== "" ||
       currentProvisionalState.reasoning !== "" ||
       currentProvisionalState.compacting ||
-      provisionalToolCalls.length > 0);
+      allProvisionalToolCalls.length > 0);
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
   const activeAgent = currentChatMetadata?.activeAgent;
@@ -6642,6 +6686,62 @@ function ChatInterface({
     return out;
   }, [currentMessages, messageStates, outputOfWorkpiece]);
 
+  // The one interface in this chat the user may still act on, if any (see findLiveGenerativeUiCall).
+  const liveGenerativeUiCallId = useMemo(
+    () => findLiveGenerativeUiCall(currentMessages),
+    [currentMessages],
+  );
+
+  // Rebuilt when the chat changes, not per card: every card in a chat talks to the same overseer
+  // through the same two calls, and the client holds no state of its own.
+  const generativeUiClient = useMemo(
+    () => selectedChatId === null
+      ? null
+      : createOverseerGenerativeUiClient(getOverseer, selectedChatId),
+    [getOverseer, selectedChatId],
+  );
+
+  /**
+   * The cards a turn's tool calls draw for themselves: composed interfaces, and the generic row
+   * for a tool this build doesn't own (see isSelfCardingToolCall).
+   *
+   * Placed above the collapsed work row by both callers, so an interface the user is meant to fill
+   * in sits where the agent's message left off rather than under a fold of bookkeeping.
+   */
+  const renderSelfCardingToolCalls = (toolCalls: AiToolCall[] | undefined) => {
+    const cards = (toolCalls ?? []).filter(isSelfCardingToolCall);
+    if (cards.length === 0) return null;
+    return (
+      <>
+        {cards.map((tc) => {
+          if (!isWorkshopToolName(tc.toolName)) {
+            return (
+              <RemoteToolCard
+                key={tc.toolCallId}
+                toolName={tc.toolName}
+                status={tc.error ? "error" : "done"}
+                error={tc.error}
+              />
+            );
+          }
+          const result = normalizeGenerativeUiResult(
+            (tc as Extract<AiToolCall, { toolName: "renderUI" }>).output,
+          );
+          if (!result) return <UnreadableUiCard key={tc.toolCallId} />;
+          return (
+            <GenerativeUiCard
+              key={tc.toolCallId}
+              toolCallId={tc.toolCallId}
+              result={result}
+              client={generativeUiClient}
+              interactive={tc.toolCallId === liveGenerativeUiCallId}
+            />
+          );
+        })}
+      </>
+    );
+  };
+
   const renderConnectionRequestCard = (
     msg: AiChatMessage & { type: "connectionRequest" },
   ) => {
@@ -7615,6 +7715,7 @@ function ChatInterface({
                           : -1;
                         return (
                           <div key={entry.key} className={`${entryTopClass} min-w-0 w-full max-w-[860px] space-y-2`}>
+                            {renderSelfCardingToolCalls(entry.toolCalls)}
                             {entry.toolCallGroups.map((group, groupIndex) => (
                               <ToolGroupRow
                                 outputOf={resolveToolOutput}
@@ -7826,6 +7927,8 @@ function ChatInterface({
                                 </div>
                               )}
                             </div>
+
+                            {renderSelfCardingToolCalls(entry.toolCalls)}
 
                             {createdGadgets.map((created) => (
                               <CreatedGadgetChatCard
@@ -8092,7 +8195,7 @@ function ChatInterface({
                         awaitingFirstResponse &&
                         !currentProvisionalState?.text &&
                         !hasShownReasoning &&
-                        provisionalToolCalls.length === 0;
+                        allProvisionalToolCalls.length === 0;
 
                       // Match the spacing this response gets once finalized (see rhythmTopClass)
                       // so it doesn't shift when streaming completes.
@@ -8131,6 +8234,20 @@ function ChatInterface({
                               <MarkdownMessage message={currentProvisionalState.text} />
                             </div>
                           )}
+
+                          {provisionalSelfCardingCalls.map((tc) => (
+                            tc.toolName === "renderUI"
+                              // `code` is the streamed tool input, when the backend streams it (it
+                              // does for executeCode today). Empty just means no skeleton.
+                              ? <ComposingUiCard key={tc.toolCallId} jsx={tc.code} />
+                              : (
+                                <RemoteToolCard
+                                  key={tc.toolCallId}
+                                  toolName={tc.toolName ?? ""}
+                                  status="running"
+                                />
+                              )
+                          ))}
 
                           {provisionalToolCalls.length > 0 && (() => {
                             const first = provisionalToolCalls[0];

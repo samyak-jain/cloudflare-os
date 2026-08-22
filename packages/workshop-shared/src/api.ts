@@ -1844,6 +1844,37 @@ export interface Overseer extends RpcTarget {
   denyConnectionRequest(requestId: string): Promise<void>;
 
   /**
+   * Record the current bound state of a `renderUI` card (see `GenerativeUiResult`).
+   *
+   * The card is local-first: the user's keystrokes land in the client's own copy immediately and
+   * arrive here debounced, so this is a mirror for reload and for other viewers of the same chat,
+   * never the thing on the render path. The whole state is sent rather than a patch, which makes a
+   * retry after a dropped connection idempotent and makes out-of-order delivery harmless.
+   *
+   * Ignored for a card whose submission has already been consumed: a frozen form cannot be edited.
+   */
+  setGenerativeUiState(
+    chatId: number,
+    toolCallId: string,
+    state: Record<string, unknown>,
+  ): Promise<void>;
+
+  /**
+   * Submit a `renderUI` card: the user pressed a Button carrying `action`.
+   *
+   * The submission becomes an input event into the agent's session (the same shape as a
+   * workspace-delta notice) carrying the action name and the state as sent, and marks the card
+   * consumed so it freezes. Non-blocking in the same sense as `requestConnection`: the turn it
+   * starts is ordinary, and the card is read-only from here on.
+   */
+  submitGenerativeUiAction(
+    chatId: number,
+    toolCallId: string,
+    action: string,
+    state: Record<string, unknown>,
+  ): Promise<void>;
+
+  /**
    * Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
    * If `startAfter` is set, replay actions changed after that timestamp.
    */
@@ -2890,6 +2921,76 @@ export function isTextLikeAttachmentMimeType(mimeType: string): boolean {
       /\b(json|javascript|typescript|xml|yaml|csv|markdown)\b/.test(mimeType);
 }
 
+
+/**
+ * The component catalog the `renderUI` tool writes against, in agreement order: a model's JSX is
+ * rejected by the sandbox validator unless every element names one of these.
+ *
+ * The catalog is versioned as a whole (`GenerativeUiResult.catalogVersion`) rather than per
+ * component, because a tree is only meaningful against the catalog it was authored for. A client
+ * that meets a newer version still renders what it recognizes -- an element it doesn't know
+ * degrades to an inert placeholder rather than failing the card -- so adding a component is a
+ * forward-compatible change and a *stored* tree keeps rendering after an upgrade.
+ */
+export const GENERATIVE_UI_CATALOG = [
+  "Stack", "Row", "Card", "Text", "Heading", "Badge", "Divider", "Button",
+  "Input", "Select", "Checkbox", "Slider", "Table", "ProgressBar", "Callout", "KeyValue",
+] as const;
+
+/** A component name from `GENERATIVE_UI_CATALOG`. */
+export type GenerativeUiComponent = typeof GENERATIVE_UI_CATALOG[number];
+
+/** The catalog revision this build of the contract describes. */
+export const GENERATIVE_UI_CATALOG_VERSION = 1;
+
+/**
+ * A reference to a path in a card's bound state, standing where a literal prop value would.
+ *
+ * This is the whole of the interactivity model: generated UI never carries handlers, only data
+ * paths, so nothing the model wrote is ever executed on the client. A control whose value prop is
+ * a binding reads that path and writes back to it; everything else is inert display.
+ *
+ * `path` is dot-separated (`"filters.region"`), addressing `stateDefaults` as a plain object tree.
+ */
+export type GenerativeUiBinding = { $bind: string };
+
+/** Whether a prop value is a state binding rather than a literal. */
+export function isGenerativeUiBinding(value: unknown): value is GenerativeUiBinding {
+  return typeof value === "object" && value !== null &&
+      typeof (value as {$bind?: unknown}).$bind === "string";
+}
+
+/**
+ * One validated element of a generative-UI tree.
+ *
+ * This is the *only* thing that crosses the wire from the sandbox: the model's JSX is evaluated in
+ * a fresh isolate and what leaves it is plain JSON. No functions, no refs, no closures -- a prop
+ * is a literal, a `GenerativeUiBinding`, or a JSON structure of those.
+ *
+ * `type` is typed as `string`, not `GenerativeUiComponent`, on purpose: a tree persisted by a
+ * deployment with a larger catalog must still deserialize here (the renderer places an inert
+ * placeholder for a name it doesn't know).
+ */
+export type GenerativeUiNode = {
+  type: string;
+  props: Record<string, unknown>;
+  children: (GenerativeUiNode | string)[];
+};
+
+/**
+ * The validated interface `renderUI` returns, stored in the tool call so the card re-renders on
+ * reload without re-running the model.
+ *
+ * `stateDefaults` seeds the card's bound state -- the initial value of every path any `$bind` in
+ * the tree names. The live state lives client-side and is mirrored to the chat's own store; the
+ * defaults are what a reloaded, never-touched card shows.
+ */
+export type GenerativeUiResult = {
+  tree: GenerativeUiNode;
+  stateDefaults: Record<string, unknown>;
+  catalogVersion: number;
+};
+
 /**
  * Describes a tool call performed by an AI agent as part of a message.
  *
@@ -3107,7 +3208,61 @@ export type AiToolCall = {
     bindingName?: string;
   };
   output?: string;
+} | {
+  /**
+   * Answer with an ephemeral interface instead of prose: the model writes JSX against the
+   * whitelisted `GENERATIVE_UI_CATALOG`, the DO evaluates it in a fresh sandboxed isolate, and only
+   * the validated JSON tree comes back. Nothing executable ever reaches the client.
+   *
+   * `state` seeds the card's bound state where the JSX's own `bind()` defaults aren't enough (a
+   * form pre-filled from something the agent already knows). Validation failures are ordinary tool
+   * errors -- they land in `error` and the agent retries through its usual correction path.
+   */
+  toolName: "renderUI";
+  input: {
+    jsx: string;
+    state?: Record<string, unknown>;
+  };
+
+  /**
+   * The validated tree, recorded so the card survives a reload: re-running the model to redraw a
+   * form the user is halfway through filling in would be both expensive and wrong. Absent only
+   * when the call failed (`error` is set).
+   */
+  output?: GenerativeUiResult;
 });
+
+/**
+ * Every tool name `AiToolCall` covers, as a runtime value.
+ *
+ * The union is closed, but the chat log is not: a Hermes-backed chat records the agent's *own*
+ * tools (memory, spawned children, and so on) as ordinary tool-call rows, and their names are by
+ * construction not in this union. Membership here is what tells the UI which of the two it is
+ * holding -- a workshop tool it can render a purpose-built card for, or a remote one it can only
+ * report generically. Casting such a row to `AiToolCall` and reading `toolName` is sound; reading
+ * anything else off it is not.
+ *
+ * The type check below fails to compile if a variant is added to the union and not to this list.
+ */
+export const AI_TOOL_NAMES = [
+  "readFile", "writeFile", "editFile", "describeBinding", "setBindingHook", "setGadgetBinding",
+  "saveCapsuleAsBinding", "createGadget", "executeCode", "giveUp", "webFetch",
+  "observeUserChanges", "listBlueprints", "listConnectableResources", "requestConnection",
+  "renderUI",
+] as const satisfies readonly AiToolCall["toolName"][];
+
+// Compile-time exhaustiveness check for AI_TOOL_NAMES: `never` unless the list covers the union.
+type UncoveredToolName = Exclude<AiToolCall["toolName"], typeof AI_TOOL_NAMES[number]>;
+const _allToolNamesCovered: UncoveredToolName[] = [];
+void _allToolNamesCovered;
+
+/**
+ * Whether a recorded tool call is one of the workshop's own tools, as opposed to a tool the
+ * backing agent ran on its own side (see `AI_TOOL_NAMES`).
+ */
+export function isWorkshopToolName(toolName: string): toolName is AiToolCall["toolName"] {
+  return (AI_TOOL_NAMES as readonly string[]).includes(toolName);
+}
 
 // TODO: Extend AiToolCall for code-mode tool calls.
 // - Includes inline audit logs from the action.

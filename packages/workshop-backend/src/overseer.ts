@@ -10226,6 +10226,24 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // agent sees it the next time the user sends a message (see the connectionRequest history case).
   }
 
+  // ── renderUI (generative UI) ──────────────────────────────────────────────────────────────────
+  //
+  // Declared here so the frontend's card has a typed surface to call; the storage and the
+  // input-event delivery behind them land with the renderUI tool itself, in the backend change.
+  // They throw rather than no-op on purpose: a card that reports "Submitted" for a submission the
+  // agent never received would be a worse failure than a visible one.
+
+  async setGenerativeUiState(
+      _chatId: number, _toolCallId: string, _state: Record<string, unknown>): Promise<void> {
+    throw new Error("Not implemented: generative-UI state is part of the renderUI backend change.");
+  }
+
+  async submitGenerativeUiAction(
+      _chatId: number, _toolCallId: string, _action: string,
+      _state: Record<string, unknown>): Promise<void> {
+    throw new Error("Not implemented: generative-UI submission is part of the renderUI backend change.");
+  }
+
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
     let actions = this.impl.storage.actions;
@@ -11154,6 +11172,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async acceptConnectionRequest(_requestId: string, _result: {gatekeeperId: number}): Promise<void> { this.#deny(); }
   async denyConnectionRequest(_requestId: string): Promise<void>  { this.#deny(); }
+  // A "use" collaborator sees the workspace's gadgets, not its chats, so it has no card to fill in.
+  async setGenerativeUiState(
+      _chatId: number, _toolCallId: string, _state: Record<string, unknown>): Promise<void> { this.#deny(); }
+  async submitGenerativeUiAction(
+      _chatId: number, _toolCallId: string, _action: string,
+      _state: Record<string, unknown>): Promise<void> { this.#deny(); }
   async subscribeToActions(
       subscriber: RpcStub<ActionsSubscriber>, _startAfter?: Date): Promise<RpcStub<{}>> {
     // Inert: "use" sessions have no visibility into the action log. Signal a settled, empty log
