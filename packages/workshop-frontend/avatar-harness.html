@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+  Development-only QA page for the avatar runtime: http://localhost:3000/avatar-harness.html
+
+  Vite's default build input is `index.html` alone, so this entry is served by `vite dev` and is
+  absent from the production bundle. See src/avatar/harness/main.tsx and docs/avatar-qa.md.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lena avatar — QA harness</title>
+    <style>
+      html, body { margin: 0; padding: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/avatar/harness/main.tsx"></script>
+  </body>
+</html>
