@@ -8,6 +8,17 @@
     <meta http-equiv="Content-Security-Policy" content="frame-src srcdoc:;">
 
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- `use-credentials` because the whole origin sits behind Cloudflare Access: a manifest link
+         without it is fetched without cookies, and the Access redirect answers with HTML, which
+         fails to parse as a manifest and takes installability with it. -->
+    <link rel="manifest" href="/site.webmanifest" crossorigin="use-credentials" />
+
+    <!-- Pre-boot default; `applyThemeMode` in src/theme.ts rewrites this to match the resolved
+         light/dark surface as soon as the app runs. -->
+    <meta name="theme-color" content="#050509" />
+
     <title>Cloudflare OS</title>
   </head>
   <body>

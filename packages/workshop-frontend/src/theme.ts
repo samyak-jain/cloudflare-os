@@ -47,12 +47,24 @@ export function resolveThemeMode(mode: ThemeMode): ResolvedThemeMode {
   return mode === 'system' ? getSystemThemeMode() : mode
 }
 
+// Color an installed app paints its browser chrome (Android's status bar, the task switcher) with.
+// These are `--color-kumo-base` per mode from styles.css -- the surface `body` paints -- and not
+// the accent, which a deployment overrides at runtime and which never reaches that chrome.
+// `index.html` and the manifest ship the dark value; this is what corrects it for a light app.
+const BROWSER_THEME_COLORS: Record<ResolvedThemeMode, string> = {
+  light: '#fcfcfb',
+  dark: '#050509',  // oklch(0.115 0.012 285)
+}
+
 export function applyThemeMode(mode: ThemeMode): ResolvedThemeMode {
   const resolved = resolveThemeMode(mode)
   const root = document.documentElement
 
   root.setAttribute('data-mode', resolved)
   root.style.colorScheme = resolved
+
+  const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+  if (themeColor) themeColor.content = BROWSER_THEME_COLORS[resolved]
 
   return resolved
 }

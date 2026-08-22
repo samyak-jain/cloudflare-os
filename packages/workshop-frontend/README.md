@@ -28,3 +28,17 @@ login/signup flow. No frontend build flag is required.
 Enable Access on the backend with both `ACCESS_TEAM_DOMAIN` (hostname only, such as
 `team.cloudflareaccess.com`) and `ACCESS_APP_AUD`. Leaving both absent preserves ordinary local and
 password-based development.
+
+## Installable app
+
+`public/site.webmanifest`, the committed `icon-*.png`, and the `<link>`/`<meta>` tags in
+`index.html` are all it takes to install the app from Chrome on Android. There is deliberately no
+service worker: Chrome no longer requires one to offer installation, and this client is a live
+WebSocket session behind Cloudflare Access, where a cache would only serve stale hashed bundles and
+intercept Access's redirects.
+
+Regenerate the icons after editing `public/favicon.svg` — they are committed, not built:
+
+```sh
+node ../../scripts/generate-pwa-icons.ts   # needs ImageMagick 7 with librsvg
+```
