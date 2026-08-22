@@ -163,6 +163,12 @@ export class AvatarStateMachine {
         // room for, whose first delta re-poses the avatar, or by the turn boundary.
         break;
 
+      case "toolActivity":
+        // Hermes-local calls are display-only and have no call ID. Every lifecycle update is still
+        // a live work signal; the turn boundary, not a synthetic execution result, ends the pose.
+        this.#note("working", workKindForTool(event.toolName), now);
+        break;
+
       case "toolCallStarted": {
         const work = workKindForTool(event.toolName);
         this.#toolKinds.set(event.toolCallId, work);

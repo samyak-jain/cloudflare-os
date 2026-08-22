@@ -98,6 +98,10 @@ import {
   UnreadableUiCard,
 } from "./genui";
 import { RemoteToolCard } from "./components/chat/RemoteToolCard";
+import {
+  projectToolActivity,
+  type ToolActivityCardState,
+} from "./components/chat/toolActivity";
 import { useConnectionLost } from "./RpcContext";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
@@ -4554,6 +4558,8 @@ type ProvisionalChatState = {
   compacting: boolean;
   toolCalls: ProvisionalToolCallState[];
   toolCallsById: Map<string, ProvisionalToolCallState>;
+  toolActivities: ToolActivityCardState[];
+  nextToolActivityKey: number;
   activeEditingFile: ActiveFileTarget | null | undefined;
 };
 
@@ -4564,6 +4570,8 @@ function createProvisionalChatState(): ProvisionalChatState {
     compacting: false,
     toolCalls: [],
     toolCallsById: new Map(),
+    toolActivities: [],
+    nextToolActivityKey: 1,
     activeEditingFile: undefined,
   };
 }
@@ -4573,6 +4581,7 @@ function clearProvisionalTextState(state: ProvisionalChatState) {
   state.reasoning = "";
   state.toolCalls = [];
   state.toolCallsById.clear();
+  state.toolActivities = [];
   // Note: This function only clears chat streaming state, not the active-file marker. Chat
   // streaming is reset when a message arrives (once per step); the active-file marker is reset
   // when the finalized changes arrive (at the end of a turn). (Streaming *code* needs no
@@ -4589,6 +4598,7 @@ function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
     state.reasoning === "" &&
     !state.compacting &&
     state.toolCalls.length === 0 &&
+    state.toolActivities.length === 0 &&
     state.activeEditingFile === undefined
   );
 }
@@ -5150,6 +5160,7 @@ function ChatInterface({
     currentRowBuffer !== null && currentRowBuffer.rows.some(row => row.submission !== undefined);
 
   const allProvisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
+  const provisionalToolActivities = currentProvisionalState?.toolActivities ?? [];
   // Streaming counterpart of isSelfCardingToolCall: an interface being composed and a remote tool
   // being run each get their own card while they stream, and stay out of the collapsed work row.
   const provisionalToolCalls = allProvisionalToolCalls.filter(
@@ -5639,6 +5650,9 @@ function ChatInterface({
           break;
         case "reasoningDelta":
           provisional.reasoning += event.delta;
+          break;
+        case "toolActivity":
+          projectToolActivity(provisional, event.toolName, event.status);
           break;
         case "toolCallStarted": {
           getOrCreateProvisionalToolCall(
@@ -8252,6 +8266,14 @@ function ChatInterface({
                               <MarkdownMessage message={currentProvisionalState.text} />
                             </div>
                           )}
+
+                          {provisionalToolActivities.map((activity) => (
+                            <RemoteToolCard
+                              key={activity.key}
+                              toolName={activity.toolName}
+                              status={activity.status}
+                            />
+                          ))}
 
                           {provisionalSelfCardingCalls.map((tc) => (
                             tc.toolName === "renderUI"
