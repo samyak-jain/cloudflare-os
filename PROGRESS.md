@@ -31,10 +31,12 @@
   autonomous turn before acknowledging it.
 - Wake turns attach to Hermes's existing event ledger rather than POSTing a second turn. Attachments
   survive DO/stream interruption until the terminal persistence barrier.
-- Session ID changes clear per-epoch tool projection state.
+- Session ID changes reset the chat projection epoch while retaining tool-call rows for every
+  older turn that has not reached a durable terminal state.
 - Replay-derived user edits, reverts, and stale reads are sent as bounded canonical-JSON deltas with
   stable IDs. Established-session deltas are accepted before the dependent user turn; only a first
-  session uses post-`turn.started` delivery and retries a 409 on the next replay.
+  session uses post-`turn.started` delivery. A stale established-session 409 now invalidates the
+  local epoch and immediately creates a replacement turn, then delivers deltas post-start.
 
 ## Phase 4 — adversarial-review rework (complete)
 
@@ -86,6 +88,52 @@ Rework validation:
 - `pnpm lint:check`: pass with pre-existing warning-level diagnostics only.
 - `pnpm types:scripts`: pass.
 
+## Phase 5 — second adversarial-review rework (complete)
+
+All six findings in the `Re-review @ 8241e58` section are fixed:
+
+1. Wake rows now retain `attempts`, `nextAttemptAt`, bounded failure metadata, and terminal
+   `dead_letter` state. Retryable detachments use exponential backoff with jitter and stop after
+   five failed wake attempts. Permanent 4xx/protocol poison dead-letters on its first confirmed
+   failure, emits a structured error log, and remains queryable through
+   `OverseerDurableObject.getHermesWakeHealth()`. Dequeue is FIFO among ready records, so a later
+   ready wake advances while an earlier wake sleeps.
+2. Tool claims carry their Hermes session epoch. Accepting or starting a new epoch never deletes
+   another turn's rows; rows are garbage-collected by turn only after that turn records a durable
+   terminal state. An old-epoch turn may therefore resume and terminate after a newer epoch was
+   accepted without reopening `executeCode` execution.
+3. Accepted attachments carry a durable `committedAfterSeq`. The assistant append, terminal marker,
+   cursor, and projection key are written in one Durable Object storage transaction. Constructor
+   recovery recognizes an already-projected wake and completes it without reattaching, preventing
+   duplicate assistant appends across the projection/acknowledgement crash window.
+4. An established-session delta 409 atomically clears the local session binding and proceeds to
+   `POST /turns`; the new `turn.started` establishes the replacement epoch and deltas follow on the
+   post-start path. Other delta failures are status-only logged and do not block the user turn.
+5. Turn creation, reattach, tool-result, control, and delta requests all have abort-signal request
+   deadlines. SSE reads have a 90-second idle deadline, and every local turn has a hard deadline at
+   the configured turn cap plus 60 seconds. Retry, clean-EOF, `Retry-After`, and wake scheduling
+   delays all include jitter.
+6. `packages/workshop-backend/__integration__/hermes-durability.test.ts` uses the real Overseer DO
+   and typed Durable Object storage. It covers claim-before-side-effect ordering, separate racing
+   DO deliveries, restart with an unresolved `executeCode` claim, overlapping epochs, restart
+   between terminal projection and wake completion, poison dead-letter advancement, and a
+   202-accepted wake surviving object restart. The Map tests remain fast logic tests and are not
+   cited as durability evidence.
+
+The cross-repository parser test now fails when workshop-platform is absent. A local-only opt-out
+requires the explicit `HERMES_CONTRACT_SKIP=1` environment variable.
+
+Second-rework validation:
+
+- Actual `WorkshopTurnRequest.from_dict()` parser: pass, 13 tools accepted.
+- Focused Hermes unit tests: 3 files / 30 tests pass.
+- Real Overseer workerd durability tests: 6/6 pass.
+- Workshop backend: 39 files / 517 unit tests pass; workerd integration passes 8 and skips the same
+  4 reset-flag cases documented as locally untestable.
+- `pnpm build`: pass, all 67 workspace build tasks.
+- `pnpm test`: pass, all 24 workspace test tasks; root scripts pass 147/147.
+- `pnpm lint`: pass; warning-level diagnostics are pre-existing.
+
 ## Phase 3 — validation (complete)
 
 - `vp run -F @gadgets/workshop-backend build`: pass.
@@ -102,7 +150,8 @@ Rework validation:
 ## Remaining
 
 - Hermes implementation is committed in `b20ac29` (schema fixtures), `1b48d00` (initial provider
-  and driver), and `d40e0f6` (all ten accepted adversarial-review fixes).
+  and driver), `d40e0f6` (the first adversarial-review fixes), and `841a22f` (the six second
+  re-review fixes plus real-DO durability coverage).
 - Draft PR: https://github.com/samyak-jain/cloudflare-os/pull/1
-- No implementation work remains in this rework assignment. The fixes and recorded validation are
-  pushed to the existing draft PR; the PR remains intentionally unmerged.
+- The second re-review fixes and their real-DO evidence are committed and ready to push to the
+  existing draft PR; the PR remains intentionally unmerged.
