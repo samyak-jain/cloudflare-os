@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type RenderUIResult, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, replaceSpanChange, type CodeContent, type CodeChange }
   from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -29,6 +29,7 @@ import {
   getModelTokenLimits, isCompactionTurn, protectRetainedReverts, shouldCompactChat,
   type CompactionProjectionMessage,
 } from "./agent-compaction";
+import { summarizeRenderUIResult } from "./render-ui";
 
 const logger = createWorkshopLogger("workshop.agent");
 
@@ -463,6 +464,11 @@ export interface AgentHooks {
                    initiator: AiChatAuthorInfo, initiatorModelId: string,
                    bindings: Record<string, ChatBindingEntry>,
                    onOutputText?: (delta: string) => void): Promise<string>;
+
+  /** Execute and durably initialize a renderUI expression for this chat. */
+  renderUI(
+      chatId: number, jsx: string,
+      stateDefaults: Record<string, unknown>): Promise<RenderUIResult>;
   activeAgentCallbackCount(chatId: number): number;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number)
@@ -1662,6 +1668,12 @@ export async function runAgent(
                 case "executeCode":
                   toolOutput = {text: toolCall.output!};
                   break;
+                case "renderUI":
+                  if (toolCall.output === undefined) {
+                    throw new Error("renderUI tool call in log is missing output");
+                  }
+                  toolOutput = {text: summarizeRenderUIResult(toolCall.output)};
+                  break;
                 case "giveUp":
                   toolOutput = {text: jsonToolResultText({rejected: true})};
                   break;
@@ -2733,6 +2745,22 @@ export async function runAgent(
           throw error;
         }
       }
+    }),
+
+    renderUI: defineTool({
+      ...WORKSHOP_AGENT_TOOL_DEFINITIONS.renderUI,
+      label: "Render UI",
+      execute: async (toolCallId, {jsx, state}) => {
+        try {
+          let output = await hooks.renderUI(chatId, jsx, state ?? {});
+          return toolResult(
+              summarizeRenderUIResult(output),
+              {output} as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      },
     }),
 
     listConnectableResources: defineTool({

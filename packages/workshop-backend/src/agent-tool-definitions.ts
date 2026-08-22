@@ -192,6 +192,23 @@ The function also receives a \`self\` parameter which is a magic object that poi
       }),
     }),
   },
+  renderUI: {
+    name: "renderUI",
+    description: `
+Render an ephemeral interface in the chat. Pass one JavaScript expression containing JSX and an optional JSON \`state\` object. Use only this catalog (all props are strict; no HTML tags or extra props): Stack(gap,align,padding), Row(gap,align,justify,wrap), Card(title,padding,tone), Text(size,tone,weight,align), Heading(level,tone,align), Badge(tone), Divider(orientation), Button(action,variant,disabled), Input(label,value,placeholder,name,type,disabled), Select(label,value,options,placeholder,name,disabled), Checkbox(label,checked,name,disabled), Slider(label,value,min,max,step,name,disabled), Table(columns,rows,caption), ProgressBar(value,max,label,tone), Callout(title,tone), KeyValue(items). Image is not available.
+
+For interactive values use \`bind("path.to.value")\`, where the path names a primitive leaf supplied in \`state\`; bind is allowed only on Input/Select \`value\`, Checkbox \`checked\`, and Slider \`value\`. Buttons require a stable non-empty \`action\` string. Example: \`<Stack gap="md"><Input label="Name" value={bind("form.name")} /><Button action="submit">Submit</Button></Stack>\` with \`state: {form:{name:""}}\`. Components may be created with JavaScript expressions (arrays/map/conditionals), but imports, require, spread props, functions in props, event handlers, dangerouslySetInnerHTML, and browser code are forbidden. Return one root component.
+`.trim(),
+    parameters: Type.Object({
+      jsx: Type.String({
+        description: "One JavaScript expression containing JSX against the renderUI catalog.",
+      }),
+      state: Type.Optional(Type.Unsafe<Record<string, unknown>>(Type.Object({}, {
+        additionalProperties: true,
+        description: "Initial JSON defaults for every state path referenced by bind().",
+      }))),
+    }),
+  },
   listConnectableResources: {
     name: "listConnectableResources",
     description: `
