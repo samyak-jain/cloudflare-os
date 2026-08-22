@@ -55,7 +55,11 @@ function normalizePropValue(value: unknown, depth: number): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     const normalized = normalizePropValue(entry, depth + 1);
-    if (normalized !== undefined) out[key] = normalized;
+    if (normalized !== undefined) {
+      // DefineOwnProperty keeps a durable legacy `__proto__` key inert instead of invoking the
+      // Object.prototype setter. New backend rows reject reserved keys before persistence.
+      Object.defineProperty(out, key, { value: normalized, enumerable: true });
+    }
   }
   return out;
 }

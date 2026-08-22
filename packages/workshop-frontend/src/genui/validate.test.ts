@@ -54,6 +54,16 @@ describe("normalizeGenerativeUiResult", () => {
     expect(result?.tree.props.value).toEqual({ $bind: "name" });
   });
 
+  it("keeps a legacy __proto__ key inert as an own data property", () => {
+    const props = JSON.parse('{"__proto__":{"polluted":true},"label":"safe"}');
+    const result = normalizeGenerativeUiResult({
+      tree: { type: "Text", props, children: [] },
+    });
+    expect(Object.getPrototypeOf(result!.tree.props)).toBe(Object.prototype);
+    expect(Object.hasOwn(result!.tree.props, "__proto__")).toBe(true);
+    expect(({} as {polluted?: boolean}).polluted).toBeUndefined();
+  });
+
   it("keeps numeric children as text and drops malformed ones", () => {
     const result = normalizeGenerativeUiResult({
       tree: { type: "Text", props: {}, children: ["n = ", 42, null, true, { nope: 1 }] },

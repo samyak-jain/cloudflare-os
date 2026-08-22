@@ -7,8 +7,11 @@ a validated `{type, props, children}` JSON tree reaches the client. See
 
 **Nothing executable crosses the wire.** No handlers, no closures, no component code — a prop is a
 literal, a `{"$bind": "path"}` marker, or JSON built from those. This module renders that tree
-against components *it* owns. That is the whole security posture on this side; the sandbox, the
-whitelist, and the prop validation are the backend's.
+against components *it* owns. The backend's parent realm is the authoritative security boundary:
+it independently re-validates and normalizes the isolate's returned component names, prop schemas,
+bindings, JSON shape, node budget, and byte budget before persistence. Validation inside the model's
+isolate exists only to produce faster, friendlier tool errors. The client validates again so old or
+future durable rows degrade safely, but does not substitute for the parent check.
 
 ## Layers
 

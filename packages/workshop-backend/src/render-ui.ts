@@ -24,7 +24,11 @@ export const MAX_RENDER_UI_SOURCE_BYTES = 64 * 1024;
 export const MAX_RENDER_UI_TREE_BYTES = 256 * 1024;
 
 const MAX_RENDER_UI_STATE_BYTES = 64 * 1024;
+const MAX_RENDER_UI_RESULT_BYTES = MAX_RENDER_UI_TREE_BYTES + MAX_RENDER_UI_STATE_BYTES + 4_096;
+const MAX_RENDER_UI_DEPTH = 64;
+const MAX_RENDER_UI_NODES = 5_000;
 const RENDER_UI_CPU_MS = 1_000;
+const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 type JsonValue = null | boolean | number | string | JsonValue[] | {[key: string]: JsonValue};
 
@@ -260,7 +264,10 @@ function scanComment(source: string, start: number): number {
 }
 
 function maskLiteralsAndComments(source: string): string {
-  let chars = [...source];
+  // Every scanner in this file returns UTF-16 code-unit offsets. split("") deliberately uses
+  // that same unit; spreading the string uses Unicode code points and lets astral characters
+  // shift the mask past the literal they belong to.
+  let chars = source.split("");
   let i = 0;
   while (i < source.length) {
     let c = source[i];
@@ -463,7 +470,12 @@ export function transformRenderUIJsx(source: string): string {
     throw new Error(`renderUI JSX exceeds the ${MAX_RENDER_UI_SOURCE_BYTES}-byte source limit.`);
   }
   if (!source.trim()) throw new Error("renderUI JSX cannot be empty.");
-  let codeOnly = maskLiteralsAndComments(source);
+  let withoutTrailingSemicolon = source.trim().replace(/;\s*$/, "");
+  // Transform first so JSX text children become quoted JavaScript strings. Security guards then
+  // inspect only executable positions: prose such as "import data" is inert, while import() in a
+  // JSX expression remains visible.
+  let transformed = transformJavaScript(withoutTrailingSemicolon);
+  let codeOnly = maskLiteralsAndComments(transformed);
   if (/\bimport(?:\s|\(|\.)/.test(codeOnly)) {
     throw new Error("renderUI JSX cannot import modules. Allowed globals: jsx catalog and bind().");
   }
@@ -475,8 +487,7 @@ export function transformRenderUIJsx(source: string): string {
         `renderUI JSX contains an unconditional loop that would exceed the ` +
         `${RENDER_UI_CPU_MS}ms isolate CPU limit.`);
   }
-  let withoutTrailingSemicolon = source.trim().replace(/;\s*$/, "");
-  return transformJavaScript(withoutTrailingSemicolon);
+  return transformed;
 }
 
 const RUNTIME_SOURCE = `
@@ -551,7 +562,9 @@ function statePaths(state) {
 }
 
 function schemaName(schema) {
-  if (schema.type === "string" && schema.enum) return schema.enum.map(JSON.stringify).join(" | ");
+  if (schema.type === "string" && schema.enum) {
+    return schema.enum.map(value => JSON.stringify(value)).join(" | ");
+  }
   if (schema.type === "union") return schema.variants.map(schemaName).join(" or ");
   if (schema.type === "array") return "array";
   if (schema.type === "object" || schema.type === "record") return "object";
@@ -770,7 +783,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function assertJsonValue(value: unknown, path: string, depth = 0): asserts value is JsonValue {
-  if (depth > 64) throw new Error(`${path} exceeds the maximum nesting depth.`);
+  if (depth > MAX_RENDER_UI_DEPTH) throw new Error(`${path} exceeds the maximum nesting depth.`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error(`${path} contains a non-finite number.`);
@@ -782,44 +795,213 @@ function assertJsonValue(value: unknown, path: string, depth = 0): asserts value
   }
   if (!isPlainRecord(value)) throw new Error(`${path} is not JSON.`);
   for (let [key, child] of Object.entries(value)) {
-    if (key === "__proto__" || key === "prototype" || key === "constructor") {
+    if (BLOCKED_JSON_KEYS.has(key)) {
       throw new Error(`${path} contains forbidden key ${key}.`);
     }
     assertJsonValue(child, `${path}.${key}`, depth + 1);
   }
 }
 
-function assertBind(value: unknown, path: string): asserts value is GenerativeUiBinding {
+function validateBind(value: unknown, path: string): GenerativeUiBinding {
   if (!isPlainRecord(value) || Object.keys(value).length !== 1 ||
       typeof value.$bind !== "string") {
     throw new Error(`${path} contains an invalid bind marker.`);
   }
+  if (!value.$bind) throw new Error(`${path} contains an empty bind path.`);
+  return {$bind: value.$bind};
 }
 
-function assertNode(value: unknown, path: string, depth = 0): asserts value is GenerativeUiNode {
-  if (depth > 64 || !isPlainRecord(value) || typeof value.type !== "string" ||
-      !isPlainRecord(value.props) || !Array.isArray(value.children)) {
+function schemaName(schema: ValueSchema): string {
+  if (schema.type === "string" && schema.enum) {
+    return schema.enum.map(value => JSON.stringify(value)).join(" | ");
+  }
+  if (schema.type === "union") return schema.variants.map(schemaName).join(" or ");
+  if (schema.type === "array") return "array";
+  if (schema.type === "object" || schema.type === "record") return "object";
+  if (schema.type === "scalar") return "string, number, boolean, or null";
+  return schema.type;
+}
+
+function validateCatalogValue(value: unknown, schema: ValueSchema, path: string): JsonValue {
+  switch (schema.type) {
+    case "string": {
+      if (typeof value !== "string") throw new Error(`${path} must be a string.`);
+      if (schema.minLength !== undefined && value.length < schema.minLength) {
+        throw new Error(`${path} must not be empty.`);
+      }
+      if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+        throw new Error(`${path} exceeds its ${schema.maxLength}-character limit.`);
+      }
+      if (!schema.enum) return value;
+      let matched = schema.caseInsensitive
+        ? schema.enum.find(candidate => candidate.toLowerCase() === value.toLowerCase())
+        : schema.enum.find(candidate => candidate === value);
+      if (matched === undefined) {
+        throw new Error(`${path} must be one of: ${schemaName(schema)}.`);
+      }
+      return matched;
+    }
+    case "number": {
+      let normalized = schema.coerce && typeof value === "string" && value.trim() !== ""
+        ? Number(value) : value;
+      if (typeof normalized !== "number" || !Number.isFinite(normalized)) {
+        throw new Error(`${path} must be a finite number or numeric string.`);
+      }
+      if (schema.min !== undefined && normalized < schema.min) {
+        throw new Error(`${path} must be at least ${schema.min}.`);
+      }
+      if (schema.max !== undefined && normalized > schema.max) {
+        throw new Error(`${path} must be at most ${schema.max}.`);
+      }
+      return normalized;
+    }
+    case "boolean":
+      if (typeof value !== "boolean") throw new Error(`${path} must be a boolean.`);
+      return value;
+    case "scalar":
+      if (value !== null && typeof value !== "string" && typeof value !== "boolean" &&
+          (typeof value !== "number" || !Number.isFinite(value))) {
+        throw new Error(`${path} must be a string, number, boolean, or null.`);
+      }
+      return value;
+    case "union": {
+      let errors: string[] = [];
+      for (let variant of schema.variants) {
+        try {
+          return validateCatalogValue(value, variant, path);
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      throw new Error(`${path} must match ${schemaName(schema)}. ${errors.join(" ")}`);
+    }
+    case "array":
+      if (!Array.isArray(value)) throw new Error(`${path} must be an array.`);
+      if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+        throw new Error(`${path} may contain at most ${schema.maxLength} items.`);
+      }
+      return value.map((item, index) =>
+        validateCatalogValue(item, schema.items, `${path}[${index}]`));
+    case "object": {
+      if (!isPlainRecord(value)) throw new Error(`${path} must be an object.`);
+      let allowed = Object.keys(schema.fields);
+      for (let key of Object.keys(value)) {
+        if (BLOCKED_JSON_KEYS.has(key)) {
+          throw new Error(`${path} contains forbidden key ${key}.`);
+        }
+        if (!Object.hasOwn(schema.fields, key)) {
+          throw new Error(`${path} has unknown field ${JSON.stringify(key)}. ` +
+              `Allowed fields: ${allowed.join(", ")}.`);
+        }
+      }
+      let result: {[key: string]: JsonValue} = {};
+      for (let [key, field] of Object.entries(schema.fields)) {
+        if (!Object.hasOwn(value, key)) {
+          if (!field.optional) throw new Error(`${path}.${key} is required.`);
+        } else {
+          Object.defineProperty(result, key, {
+            value: validateCatalogValue(value[key], field.schema, `${path}.${key}`),
+            enumerable: true,
+          });
+        }
+      }
+      return result;
+    }
+    case "record": {
+      if (!isPlainRecord(value)) throw new Error(`${path} must be an object.`);
+      let result: {[key: string]: JsonValue} = {};
+      for (let [key, child] of Object.entries(value)) {
+        if (BLOCKED_JSON_KEYS.has(key)) {
+          throw new Error(`${path} contains forbidden key ${key}.`);
+        }
+        Object.defineProperty(result, key, {
+          value: validateCatalogValue(child, schema.values, `${path}.${key}`),
+          enumerable: true,
+        });
+      }
+      return result;
+    }
+  }
+}
+
+function validateNode(
+    value: unknown, path: string, depth: number, counter: {count: number}): GenerativeUiNode {
+  if (depth > MAX_RENDER_UI_DEPTH || !isPlainRecord(value) ||
+      typeof value.type !== "string" || !isPlainRecord(value.props) ||
+      !Array.isArray(value.children)) {
     throw new Error(`${path} is not a valid renderUI node.`);
   }
-  if (!(value.type in RENDER_UI_CATALOG)) {
-    throw new Error(`${path} returned an unknown component.`);
+  if (++counter.count > MAX_RENDER_UI_NODES) {
+    throw new Error(`renderUI tree exceeds the ${MAX_RENDER_UI_NODES}-node limit.`);
   }
-  for (let [name, prop] of Object.entries(value.props)) {
-    if (isPlainRecord(prop) && "$bind" in prop) assertBind(prop, `${path}.props.${name}`);
-    else assertJsonValue(prop, `${path}.props.${name}`, depth + 1);
+  let nodeKeys = Object.keys(value);
+  if (nodeKeys.length !== 3 || !nodeKeys.includes("type") || !nodeKeys.includes("props") ||
+      !nodeKeys.includes("children")) {
+    throw new Error(`${path} must contain exactly type, props, and children.`);
   }
-  value.children.forEach((child, index) => {
-    if (typeof child !== "string") assertNode(child, `${path}.children[${index}]`, depth + 1);
+  if (!Object.hasOwn(RENDER_UI_CATALOG, value.type)) {
+    throw new Error(`Unknown renderUI component ${JSON.stringify(value.type)}. ` +
+        `Allowed components: ${Object.keys(RENDER_UI_CATALOG).join(", ")}.`);
+  }
+  let component = RENDER_UI_CATALOG[value.type];
+  let allowedProps = Object.keys(component.props);
+  for (let name of Object.keys(value.props)) {
+    if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML" ||
+        BLOCKED_JSON_KEYS.has(name)) {
+      throw new Error(`${path} attempts to smuggle forbidden prop ${JSON.stringify(name)}. ` +
+          `Event handlers, reserved keys, and dangerouslySetInnerHTML are never allowed.`);
+    }
+    if (!Object.hasOwn(component.props, name)) {
+      throw new Error(`${value.type} has unknown prop ${JSON.stringify(name)}. ` +
+          `Allowed props: ${allowedProps.join(", ") || "(none)"}.`);
+    }
+  }
+  let props: Record<string, unknown> = {};
+  for (let [name, prop] of Object.entries(component.props)) {
+    if (!Object.hasOwn(value.props, name)) {
+      if (!prop.optional) throw new Error(`${value.type}.${name} is required.`);
+      continue;
+    }
+    let raw = value.props[name];
+    if (isPlainRecord(raw) && Object.hasOwn(raw, "$bind")) {
+      if (!prop.bindable) throw new Error(`${value.type}.${name} cannot be bound to state.`);
+      props[name] = validateBind(raw, `${path}.props.${name}`);
+    } else {
+      props[name] = validateCatalogValue(raw, prop.schema, `${value.type}.${name}`);
+    }
+  }
+  let children = value.children.map((child, index) => {
+    if (typeof child === "string") return child;
+    return validateNode(child, `${path}.children[${index}]`, depth + 1, counter);
   });
+  if (!component.children && children.length > 0) {
+    throw new Error(`${value.type} does not accept children. Allowed props: ` +
+        `${allowedProps.join(", ") || "(none)"}.`);
+  }
+  return {type: value.type, props, children};
 }
 
-function assertRenderUIResult(value: unknown): asserts value is GenerativeUiResult {
+/** Independently validate and normalize a tree returned by the untrusted renderUI isolate. */
+export function validateRenderUINode(value: unknown): GenerativeUiNode {
+  return validateNode(value, "tree", 0, {count: 0});
+}
+
+function validateRenderUIResult(
+    value: unknown, stateDefaults: Record<string, unknown>): GenerativeUiResult {
   if (!isPlainRecord(value) || value.catalogVersion !== RENDER_UI_CATALOG_VERSION ||
       !isPlainRecord(value.stateDefaults)) {
     throw new Error("The renderUI isolate returned an invalid result envelope.");
   }
-  assertNode(value.tree, "tree");
-  assertJsonValue(value.stateDefaults, "stateDefaults");
+  let tree = validateRenderUINode(value.tree);
+  let treeBytes = sourceByteLength(JSON.stringify(tree));
+  if (treeBytes > MAX_RENDER_UI_TREE_BYTES) {
+    throw new Error(`renderUI tree exceeds the ${MAX_RENDER_UI_TREE_BYTES}-byte tree limit.`);
+  }
+  // Never use the isolate's echoed state: the parent already owns the original tool input and
+  // independently checks it against the returned bind markers.
+  let trustedState = structuredClone(stateDefaults);
+  validateRenderUIState(tree, trustedState);
+  return {tree, stateDefaults: trustedState, catalogVersion: RENDER_UI_CATALOG_VERSION};
 }
 
 /** Execute transformed JSX in a fresh, outbound-disabled Dynamic Worker and return its tree. */
@@ -865,6 +1047,12 @@ export async function executeRenderUI(
     invocation.catch(() => {});
     (entrypoint as unknown as {[Symbol.dispose]?(): void})[Symbol.dispose]?.();
   }
+  if (typeof encodedResult !== "string" ||
+      sourceByteLength(encodedResult) > MAX_RENDER_UI_RESULT_BYTES) {
+    throw new Error(
+        `renderUI isolate response exceeds the parent-enforced ` +
+        `${MAX_RENDER_UI_TREE_BYTES}-byte tree limit and bounded state envelope.`);
+  }
   let envelope: unknown = JSON.parse(encodedResult);
   if (!isPlainRecord(envelope) || typeof envelope.ok !== "boolean") {
     throw new Error("The renderUI isolate returned an invalid response envelope.");
@@ -873,9 +1061,7 @@ export async function executeRenderUI(
     throw new Error(typeof envelope.error === "string"
       ? envelope.error : "The renderUI isolate rejected the expression.");
   }
-  let result: unknown = envelope.result;
-  assertRenderUIResult(result);
-  return result;
+  return validateRenderUIResult(envelope.result, stateDefaults);
 }
 
 /** Return every {$bind:path} marker used by a validated renderUI tree. */
@@ -900,7 +1086,7 @@ export function renderUIStateValue(
       let index = Number(part);
       if (!Number.isInteger(index) || index < 0 || index >= value.length) return undefined;
       value = value[index];
-    } else if (isPlainRecord(value) && part in value) {
+    } else if (isPlainRecord(value) && Object.hasOwn(value, part)) {
       value = value[part];
     } else {
       return undefined;
@@ -910,64 +1096,58 @@ export function renderUIStateValue(
 }
 
 function validateBoundStateValue(value: unknown, schema: ValueSchema, path: string): void {
-  if (schema.type === "union") {
-    let errors: unknown[] = [];
-    for (let variant of schema.variants) {
-      try {
-        validateBoundStateValue(value, variant, path);
-        return;
-      } catch (error) {
-        errors.push(error);
+  validateCatalogValue(value, schema, path);
+}
+
+function validateStateShape(
+    value: unknown, path: string, bindPaths: ReadonlySet<string>,
+    bindPrefixes: ReadonlySet<string>): void {
+  if (path && !bindPrefixes.has(path)) {
+    throw new Error(`Unknown renderUI state path ${JSON.stringify(path)}. ` +
+        `Allowed bind paths: ${[...bindPaths].toSorted().join(", ") || "(none)"}.`);
+  }
+  if (Array.isArray(value)) {
+    value.forEach((child, index) =>
+      validateStateShape(child, path ? `${path}.${index}` : `${index}`, bindPaths, bindPrefixes));
+    return;
+  }
+  if (isPlainRecord(value)) {
+    for (let [key, child] of Object.entries(value)) {
+      if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) || BLOCKED_JSON_KEYS.has(key)) {
+        throw new Error(`Invalid renderUI state key ${JSON.stringify(key)}.`);
       }
-    }
-    throw new Error(`${path} does not match its bound control type: ` +
-        errors.map(error => error instanceof Error ? error.message : String(error)).join(" "));
-  }
-  if (schema.type === "string") {
-    if (typeof value !== "string") throw new Error(`${path} must be a string.`);
-    if (schema.minLength !== undefined && value.length < schema.minLength) {
-      throw new Error(`${path} is too short.`);
-    }
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-      throw new Error(`${path} is too long.`);
-    }
-    if (schema.enum && !schema.enum.some(candidate => schema.caseInsensitive
-      ? candidate.toLowerCase() === value.toLowerCase() : candidate === value)) {
-      throw new Error(`${path} must be one of: ${schema.enum.join(", ")}.`);
+      validateStateShape(child, path ? `${path}.${key}` : key, bindPaths, bindPrefixes);
     }
     return;
   }
-  if (schema.type === "number") {
-    let numericValue = schema.coerce && typeof value === "string" && value.trim() !== ""
-      ? Number(value) : value;
-    if (typeof numericValue !== "number" || !Number.isFinite(numericValue)) {
-      throw new Error(`${path} must be a finite number or numeric string.`);
-    }
-    if (schema.min !== undefined && numericValue < schema.min) {
-      throw new Error(`${path} must be at least ${schema.min}.`);
-    }
-    if (schema.max !== undefined && numericValue > schema.max) {
-      throw new Error(`${path} must be at most ${schema.max}.`);
-    }
-    return;
+  if (!bindPaths.has(path)) {
+    throw new Error(`Unknown renderUI state path ${JSON.stringify(path)}. ` +
+        `Allowed bind paths: ${[...bindPaths].toSorted().join(", ") || "(none)"}.`);
   }
-  if (schema.type === "boolean") {
-    if (typeof value !== "boolean") throw new Error(`${path} must be a boolean.`);
-    return;
-  }
-  throw new Error(`${path} uses an unsupported bound state schema.`);
 }
 
 /** Validate one whole-state mirror against the bindings in a previously validated tree. */
 export function validateRenderUIState(
     tree: GenerativeUiNode, state: Record<string, unknown>): void {
+  if (!isPlainRecord(state)) throw new Error("renderUI state must be a JSON object.");
   assertJsonValue(state, "state");
   if (sourceByteLength(JSON.stringify(state)) > MAX_RENDER_UI_STATE_BYTES) {
     throw new Error(`renderUI state exceeds the ${MAX_RENDER_UI_STATE_BYTES}-byte limit.`);
   }
+  let paths = new Set(listRenderUIBindPaths(tree));
+  let prefixes = new Set<string>();
+  for (let statePath of paths) {
+    let parts = statePath.split(".");
+    for (let index = 1; index <= parts.length; index++) {
+      prefixes.add(parts.slice(0, index).join("."));
+    }
+  }
+  validateStateShape(state, "", paths, prefixes);
   function visit(node: GenerativeUiNode) {
+    if (!Object.hasOwn(RENDER_UI_CATALOG, node.type)) {
+      throw new Error(`Unknown renderUI component ${JSON.stringify(node.type)}.`);
+    }
     let component = RENDER_UI_CATALOG[node.type];
-    if (!component) throw new Error(`Unknown renderUI component ${JSON.stringify(node.type)}.`);
     for (let [name, marker] of Object.entries(node.props)) {
       if (!isPlainRecord(marker) || typeof marker.$bind !== "string") continue;
       let prop = component.props[name];
@@ -985,6 +1165,26 @@ export function validateRenderUIState(
   visit(tree);
 }
 
+/** Validate one candidate durable value against every control bound to the same state path. */
+export function validateRenderUIBindValue(
+    tree: GenerativeUiNode, statePath: string, value: string | number | boolean): void {
+  let found = false;
+  function visit(node: GenerativeUiNode) {
+    let component = RENDER_UI_CATALOG[node.type];
+    if (!component) throw new Error(`Unknown renderUI component ${JSON.stringify(node.type)}.`);
+    for (let [name, marker] of Object.entries(node.props)) {
+      if (!isPlainRecord(marker) || marker.$bind !== statePath) continue;
+      let prop = component.props[name];
+      if (!prop?.bindable) throw new Error(`${node.type}.${name} is not bindable.`);
+      found = true;
+      validateBoundStateValue(value, prop.schema, `state.${statePath}`);
+    }
+    for (let child of node.children) if (typeof child !== "string") visit(child);
+  }
+  visit(tree);
+  if (!found) throw new Error(`Unknown renderUI bind path ${JSON.stringify(statePath)}.`);
+}
+
 /** Replace an existing dot path in a validated whole-state object. */
 export function setRenderUIStateValue(
     state: Record<string, unknown>, statePath: string, value: string | number | boolean): void {
@@ -1000,7 +1200,7 @@ export function setRenderUIStateValue(
       }
       if (last) cursor[arrayIndex] = value;
       else cursor = cursor[arrayIndex];
-    } else if (isPlainRecord(cursor) && part in cursor) {
+    } else if (isPlainRecord(cursor) && Object.hasOwn(cursor, part)) {
       if (last) cursor[part] = value;
       else cursor = cursor[part];
     } else {
