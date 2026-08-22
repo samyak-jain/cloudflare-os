@@ -123,7 +123,7 @@ describe("statePose", () => {
     for (const state of states) {
       const a = statePose(state, 0, 10, 0);
       const b = statePose(state, 17.3, 10, 0);
-      expect(a, state.kind).toEqual(b);
+      expect({ kind: state.kind, pose: a }).toEqual({ kind: state.kind, pose: b });
     }
   });
 
