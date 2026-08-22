@@ -1615,10 +1615,13 @@ class OverseerImpl implements AgentHooks {
   #updateExternalMessageResponseDeliveryAlarm(): void {
     if (this.#runningAgents.size > 0) return;
 
-    if ([...this.storage.hermesWakes.list()].some(record => record.state !== "terminal")) {
-      this.ctx.storage.setAlarm(Date.now());
-      return;
-    }
+    let now = Date.now();
+    let alarmCandidates = [...this.storage.hermesWakes.list()].flatMap(record =>
+      record.state === "running"
+        ? [now]
+        : record.state === "queued"
+          ? [record.nextAttemptAt]
+          : []);
 
     // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
     // Recompute from storage whenever the alarm may have been overwritten by another concern.
@@ -1626,18 +1629,20 @@ class OverseerImpl implements AgentHooks {
 
     let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
       .length > 0;
-    if (hasReadyExternalMessageResponse) {
-      this.ctx.storage.setAlarm(Date.now());
-      return;
-    }
+    if (hasReadyExternalMessageResponse) alarmCandidates.push(now);
 
     let nextDeliveredRecord = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
     if (nextDeliveredRecord?.status === "delivered") {
-      this.ctx.storage.setAlarm(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
-      return;
+      alarmCandidates.push(
+        nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS,
+      );
     }
 
-    this.ctx.storage.deleteAlarm();
+    if (alarmCandidates.length > 0) {
+      this.ctx.storage.setAlarm(Math.min(...alarmCandidates));
+    } else {
+      this.ctx.storage.deleteAlarm();
+    }
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -5879,9 +5884,12 @@ class OverseerImpl implements AgentHooks {
       // runAgent converts them back to a throw), carrying the failing request's HTTP status when
       // one was observed.
       let apiError = err instanceof AgentTurnError ? err : null;
-      let wakeDisposition = aiModel.config.provider === "hermes"
-        ? await this.#failHermesWake(chatId, err)
+      let terminalWake = aiModel.config.provider === "hermes"
+        ? this.#terminalHermesWake(chatId)
         : undefined;
+      let wakeDisposition = aiModel.config.provider === "hermes" && !terminalWake
+        ? await this.#failHermesWake(chatId, err)
+        : terminalWake;
       if (wakeDisposition?.state === "queued") {
         turnLogger.warn("Hermes wake attachment will retry", {
           event: "hermes.wake.retry.scheduled",
@@ -5918,8 +5926,16 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
-      if (aiModel.config.provider === "hermes") this.#completeTerminalHermesWake(chatId);
+      if (terminalWake) {
+        let terminalSequence = this.storage.hermesChats.get(chatId)?.terminalSequence ??
+          terminalWake.committedAfterSeq;
+        this.commitHermesErrorProjection(
+          chatId, terminalWake.turnId, terminalSequence,
+          aiModel.profile, errorMessage,
+        );
+      } else {
+        this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      }
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);
@@ -6247,8 +6263,7 @@ class OverseerImpl implements AgentHooks {
     if (!wake) return undefined;
     let chat = this.storage.hermesChats.get(chatId);
     if (chat?.terminalTurnId === wake.turnId) {
-      this.completeHermesAttachedTurn(chatId, wake.turnId);
-      return this.storage.hermesWakes.get(wake.idempotencyKey);
+      return wake;
     }
     let {metadata, retryable} = classifyHermesFailure(error);
     let baseDelay = Math.min(30_000, 1_000 * 2 ** Math.min(wake.attempts, 7));
@@ -6366,9 +6381,31 @@ class OverseerImpl implements AgentHooks {
     this.storage.hermesToolResults.byTurnId.delete(turnId);
   }
 
-  #completeTerminalHermesWake(chatId: number): void {
-    let record = this.storage.hermesChats.get(chatId);
-    if (record?.terminalTurnId) this.completeHermesAttachedTurn(chatId, record.terminalTurnId);
+  #terminalHermesWake(chatId: number): HermesWakeRecord | undefined {
+    let chat = this.storage.hermesChats.get(chatId);
+    return chat?.terminalTurnId
+      ? this.#hermesWakeRecords(chatId).find(record =>
+          record.state === "running" && record.turnId === chat.terminalTurnId)
+      : undefined;
+  }
+
+  commitHermesErrorProjection(
+      chatId: number, turnId: string, sequence: number, author: AiChatAuthorInfo,
+      message: string, code?: string): boolean {
+    let committed = false;
+    this.ctx.storage.transactionSync(() => {
+      let projectionKey = `error:${turnId}:${sequence}`;
+      let wake = this.#hermesWakeRecords(chatId).find(record => record.turnId === turnId);
+      if (wake?.terminalProjectionKey === projectionKey) return;
+      this.postAgentErrorMessage(chatId, author, message, code);
+      this.recordHermesTerminal(chatId, turnId, sequence);
+      if (wake?.state === "running") {
+        this.#hermesWakeQueue.projectTerminal(chatId, turnId, sequence, projectionKey);
+        this.#hermesWakeQueue.complete(chatId, turnId);
+      }
+      committed = true;
+    });
+    return committed;
   }
 
   completeHermesAttachedTurn(chatId: number, turnId: string): void {
@@ -6386,6 +6423,14 @@ class OverseerImpl implements AgentHooks {
 
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void {
     this.#hermesToolCalls.resolve(turnId, callId, result);
+  }
+
+  interruptHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void {
+    this.#hermesToolCalls.interrupt(turnId, callId, result);
+  }
+
+  waitUntilHermesTool(promise: Promise<unknown>): void {
+    this.ctx.waitUntil(promise);
   }
 
   hasCapturedActionAwaitingDecision(chatId: number): boolean {

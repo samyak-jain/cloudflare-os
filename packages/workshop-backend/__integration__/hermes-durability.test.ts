@@ -18,8 +18,9 @@ type Collection<T> = {
 
 type OverseerProbe = {
   impl: {
+    ctx: {storage: {getAlarm(): Promise<number | null>; deleteAlarm(): Promise<void>}};
     storage: {
-      chats: Collection<{chatId: number; sequence: number}>;
+      chats: Collection<{chatId: number; sequence: number; type?: string}>;
       chatMeta: Collection<Record<string, unknown>>;
       hermesChats: Collection<Record<string, unknown>>;
       hermesToolResults: Collection<HermesToolCallRecord>;
@@ -36,6 +37,10 @@ type OverseerProbe = {
       author: {type: "agent"; id: string; name: string},
       messages: {type: "message"; message: string}[], totalTokens: number,
       gatewayLogId: undefined, gatewayRoute: undefined, estimatedCost: number,
+    ): boolean;
+    commitHermesErrorProjection(
+      chatId: number, turnId: string, sequence: number,
+      author: {type: "agent"; id: string; name: string}, message: string,
     ): boolean;
     resumeHermesWakes(): Promise<void>;
   };
@@ -227,5 +232,74 @@ describe("Hermes durability in the real Overseer Durable Object", () => {
         attempts: 0,
       }),
     ]);
+  });
+
+  it("schedules only the sleeping retry due time and ignores retained dead letters", async () => {
+    let id = exports.OverseerDurableObject.newUniqueId();
+    let due = Date.now() + 60_000;
+    await runInDurableObject(exports.OverseerDurableObject.get(id), async instance => {
+      let overseer = impl(instance);
+      overseer.storage.hermesWakes.put({
+        ...wake(id.toString(), "dead"), state: "dead_letter", nextAttemptAt: 0,
+      });
+      overseer.storage.hermesWakes.put({
+        ...wake(id.toString(), "sleep", 2), state: "queued", nextAttemptAt: due,
+      });
+      await overseer.ctx.storage.deleteAlarm();
+      await (instance as {alarm(): Promise<void>}).alarm();
+      expect(await overseer.ctx.storage.getAlarm()).toBe(due);
+    });
+  });
+
+  it("does not schedule an alarm when Hermes has only retained dead letters", async () => {
+    let id = exports.OverseerDurableObject.newUniqueId();
+    await runInDurableObject(exports.OverseerDurableObject.get(id), async instance => {
+      let overseer = impl(instance);
+      overseer.storage.hermesWakes.put({
+        ...wake(id.toString(), "dead-only"), state: "dead_letter", nextAttemptAt: 0,
+      });
+      await overseer.ctx.storage.deleteAlarm();
+      await (instance as {alarm(): Promise<void>}).alarm();
+      expect(await overseer.ctx.storage.getAlarm()).toBeNull();
+    });
+  });
+
+  it("atomically projects one error before completing its wake across restart", async () => {
+    let id = exports.OverseerDurableObject.newUniqueId();
+    let author = {type: "agent" as const, id: "hermes", name: "Hermes"};
+    await runInDurableObject(exports.OverseerDurableObject.get(id), instance => {
+      let overseer = impl(instance);
+      overseer.storage.chatMeta.put({
+        id: 7, title: "Hermes", started: new Date(1), lastActive: new Date(1),
+      });
+      overseer.storage.hermesChats.put({
+        chatId: 7, sessionId: "session-error", currentTurnId: "turn-error",
+        terminalTurnId: "turn-error", terminalSequence: 12,
+        modelId: "hermes", initiatorUserId: "user", initiator: author,
+      });
+      overseer.storage.hermesWakes.put({
+        ...wake(id.toString(), "error"), turnId: "turn-error", state: "running",
+      });
+      // The production error handler's one transaction replaces the old crash window between
+      // triage append and wake completion.
+      expect(overseer.commitHermesErrorProjection(
+        7, "turn-error", 12, author, "provider unavailable",
+      )).toBe(true);
+    });
+    // A crash immediately after that transaction must recover both outcomes, then dedupe replay.
+    await abortAllDurableObjects();
+    await runInDurableObject(exports.OverseerDurableObject.get(id), instance => {
+      let overseer = impl(instance);
+      expect(overseer.commitHermesErrorProjection(
+        7, "turn-error", 12, author, "provider unavailable",
+      )).toBe(false);
+      expect([...overseer.storage.chats.list()].filter(
+        row => row.chatId === 7 && row.type === "error",
+      )).toHaveLength(1);
+      expect(overseer.storage.hermesWakes.get("wake-error")).toMatchObject({
+        state: "terminal", committedAfterSeq: 12,
+        terminalProjectionKey: "error:turn-error:12",
+      });
+    });
   });
 });

@@ -134,6 +134,38 @@ Second-rework validation:
 - `pnpm test`: pass, all 24 workspace test tasks; root scripts pass 147/147.
 - `pnpm lint`: pass; warning-level diagnostics are pre-existing.
 
+## Phase 6 — round-three adversarial-review rework (complete)
+
+All three accepted findings in `Re-review round 3 @ 1c0fa44` are fixed:
+
+1. Shared alarm recomputation now considers only runnable Hermes wakes: `running` records schedule
+   immediately, `queued` records contribute their exact `nextAttemptAt`, and terminal/dead-letter
+   records contribute nothing. It chooses the minimum alongside external-message retry/retention
+   deadlines, so agent teardown cannot replace a sleeping retry with an immediate busy loop. Real
+   Overseer tests assert the exact future alarm for dead letters plus one sleeping retry and no
+   alarm for dead letters alone.
+2. The hard turn deadline now cancels only Hermes network activity. Local tool mutations use a
+   separate per-call timeout, defaulting to five minutes and configurable with the validated
+   deployment variable `HERMES_LOCAL_TOOL_TIMEOUT_MS` (1–30 minutes). Timeout durably resolves the
+   claim as `interrupted`, posts `is_error: true` with `local execution timeout`, and continues the
+   remote turn. User abort immediately cancels the SSE and pending ordinary fetches; an in-flight
+   mutation is kept alive through the Overseer's `ctx.waitUntil`, resolves its durable claim for
+   dedupe, and never posts a result or continues the cancelled turn.
+3. Error-wake triage now uses one Durable Object storage transaction for the error-message append,
+   terminal cursor/projection key, and wake completion. A repeated projection after object restart
+   observes the same key and appends nothing, so the former crash window cannot lose or duplicate
+   the triage record.
+
+Round-three validation:
+
+- Focused Hermes/model unit tests: 4 files / 61 tests pass.
+- Real workerd integration: Hermes durability 9/9; total 11 pass with the same 4 documented local
+  reset-flag skips.
+- Workshop backend unit project: 39 files / 522 tests pass.
+- Actual workshop-platform `WorkshopTurnRequest.from_dict()` contract: pass, 13 tools accepted.
+- `pnpm lint`: pass; `pnpm build` completed all 67 workspace tasks, with only pre-existing warnings.
+- `pnpm test`: pass, all 24 workspace test tasks.
+
 ## Phase 3 — validation (complete)
 
 - `vp run -F @gadgets/workshop-backend build`: pass.
@@ -153,5 +185,5 @@ Second-rework validation:
   and driver), `d40e0f6` (the first adversarial-review fixes), and `841a22f` (the six second
   re-review fixes plus real-DO durability coverage).
 - Draft PR: https://github.com/samyak-jain/cloudflare-os/pull/1
-- The second re-review fixes and their real-DO evidence are committed and ready to push to the
-  existing draft PR; the PR remains intentionally unmerged.
+- The round-three fixes and real-DO evidence are ready to commit and push to the existing draft PR;
+  the PR remains intentionally unmerged.
