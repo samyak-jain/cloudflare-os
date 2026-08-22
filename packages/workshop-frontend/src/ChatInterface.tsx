@@ -86,6 +86,8 @@ import {
   OutputFormatOffer,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
+import { AvatarController, ChatAvatar, ChatAvatarStatus } from "./avatar";
+import { useConnectionLost } from "./RpcContext";
 import type { ChatChangeRow } from "./otClient";
 import { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -1887,6 +1889,7 @@ export const ChatInput = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  onComposerActivity,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -1940,6 +1943,11 @@ export const ChatInput = ({
   onStop?: () => void;
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
+  /**
+   * Called as the user types. Display-only: the avatar uses it to look up from what it was doing
+   * while someone is composing, before anything has been sent.
+   */
+  onComposerActivity?: () => void;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
   /** Open the pre-approval dialog (owned by the parent). */
   /** Called after a gatekeeper is connected via the attach flow, so the parent can refresh the
@@ -3382,6 +3390,7 @@ export const ChatInput = ({
               onChange={(e) => {
                 draftEditedRef.current = true;
                 draftRestoreGenerationRef.current++;
+                onComposerActivity?.();
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
                 syncPickerCaret(e.target.selectionStart ?? 0);
                 requestAnimationFrame(handleCursorChange);
@@ -5029,6 +5038,28 @@ function ChatInterface({
   const currentChatMetadata =
     selectedChatId !== null ? cacheRef.current.chats.get(selectedChatId) : null;
 
+  // ─── avatar ──────────────────────────────────────────────────────────────────
+  //
+  // The avatar is a view of the same event stream this component already subscribes to. It gets
+  // its events from the `ChatSubscriberImpl` methods below rather than from a subscription of its
+  // own: a second `subscribeToChat()` would double the DO's push fan-out and replay history the UI
+  // has already consumed. See src/avatar/controller.ts.
+  const avatarControllerRef = useRef<AvatarController | null>(null);
+  avatarControllerRef.current ??= new AvatarController();
+  const avatarController = avatarControllerRef.current;
+  useEffect(() => () => avatarControllerRef.current?.destroy(), []);
+
+  // Follow the viewed chat, so a previous conversation's tail never bleeds into a new one.
+  useEffect(() => {
+    avatarController.setChat(selectedChatId);
+  }, [avatarController, selectedChatId]);
+
+  // A dropped socket freezes the stream; the avatar says so rather than settling to idle.
+  const rpcConnectionLost = useConnectionLost();
+  useEffect(() => {
+    avatarController.setConnectionLost(rpcConnectionLost);
+  }, [avatarController, rpcConnectionLost]);
+
   // Download a committed chat attachment. Image bytes are already inlined on the message; other
   // attachments are fetched on demand over the authenticated RPC connection.
   const downloadChatAttachment = useCallback(async (chatId: number, attachment: ChatAttachmentRef) => {
@@ -5354,6 +5385,10 @@ function ChatInterface({
     }
 
     metadata(chat: AiChatMetadata) {
+      // Turn boundary for the avatar: `activeAgent` set means a turn is running, unset means it
+      // ended, which is what decides between the `done` flash and a plain settle to idle.
+      avatarControllerRef.current?.setAgentActive(chat.id, chat.activeAgent !== undefined);
+
       // When the agent stops running (activeAgent becomes unset), do a final full clear of this
       // chat's provisional streaming state. This generally shouldn't be necessary because chat
       // stream state is cleared when the final message arrives and code stream state is cleared
@@ -5460,6 +5495,10 @@ function ChatInterface({
     }
 
     message(msg: AiChatMessage) {
+      // The avatar reads user rows as "someone is waiting on me", agent rows as "this turn
+      // produced something", and error rows as a failed turn.
+      avatarControllerRef.current?.handleMessage(msg.chatId, msg);
+
       // Use sequence number as index to make this idempotent
       // This handles both duplicate subscriptions (React strict mode) and race conditions
 
@@ -5530,6 +5569,8 @@ function ChatInterface({
     }
 
     stream(chatId: number, event: AiChatStreamEvent) {
+      avatarControllerRef.current?.handleStream(chatId, event);
+
       let provisional = provisionalRef.current.get(chatId);
 
       if (!provisional) {
@@ -5845,6 +5886,10 @@ function ChatInterface({
 
     // Use provided modelId or fall back to selectedModel
     const model = modelId !== undefined ? modelId : selectedModel;
+
+    // Acknowledged locally rather than on the echoed message row: the avatar should react on the
+    // same frame the composer clears, not a round trip later.
+    avatarControllerRef.current?.noteUserMessageSent();
 
     try {
       if (selectedChatId === null) {
@@ -7233,11 +7278,17 @@ function ChatInterface({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
           {sidebarMode && (
-            <div className="flex h-12 flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
+            <div className="flex h-[104px] flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
+              {/* Same avatar, same controller; in sidebar mode this bar is the chat's only chrome. */}
+              <ChatAvatar controller={avatarController} size={96} />
+              <ChatAvatarStatus
+                controller={avatarController}
+                className="mb-4 self-end truncate text-[11px] leading-4 text-kumo-inactive"
+              />
               <button
                 type="button"
                 onClick={() => setSidebarActiveTab("chat")}
-                className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
+                className={`relative flex h-12 cursor-pointer items-center self-end text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "chat"
                     ? "font-medium text-kumo-default after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-kumo-contrast/70"
                     : "font-normal text-kumo-subtle hover:text-kumo-default"
@@ -7248,7 +7299,7 @@ function ChatInterface({
               <button
                 type="button"
                 onClick={() => setSidebarActiveTab("connections")}
-                className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
+                className={`relative flex h-12 cursor-pointer items-center self-end text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "connections"
                     ? "font-medium text-kumo-default after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-kumo-contrast/70"
                     : "font-normal text-kumo-subtle hover:text-kumo-default"
@@ -7271,7 +7322,7 @@ function ChatInterface({
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
               {!sidebarMode && (
-                <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
+                <div className="flex h-[104px] flex-shrink-0 items-center justify-between gap-3 border-b border-kumo-line px-4">
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
                     className="!h-8 !w-8 flex-shrink-0"
@@ -7280,6 +7331,12 @@ function ChatInterface({
                   >
                     <CaretLeft size={14} />
                   </WorkshopIconButton>
+
+                  {/*
+                    Lena. A view of the turn stream, sized at the 96 px RIG.md §5 calls "still
+                    comfortable" -- the smallest at which the mouth still reads as a shape.
+                  */}
+                  <ChatAvatar controller={avatarController} size={96} />
 
                   {isEditingTitle ? (
                     <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -7313,9 +7370,19 @@ function ChatInterface({
                     </div>
                   ) : (
                     <>
-                      <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                        {currentChatMetadata?.title || "Chat"}
-                      </span>
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <span className="min-w-0 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                          {currentChatMetadata?.title || "Chat"}
+                        </span>
+                        {/*
+                          What the avatar is showing, in words. Subscribes on its own so a turn's
+                          state changes never re-render this component -- see ChatAvatarStatus.
+                        */}
+                        <ChatAvatarStatus
+                          controller={avatarController}
+                          className="truncate text-[11px] leading-4 text-kumo-inactive"
+                        />
+                      </div>
                       <WorkshopIconButton
                         onClick={() => setIsEditingTitle(true)}
                         className="!h-8 !w-8 flex-shrink-0 text-kumo-inactive hover:text-kumo-subtle"
@@ -8152,6 +8219,7 @@ function ChatInterface({
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
+                    onComposerActivity={() => avatarControllerRef.current?.noteUserComposing()}
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel}
