@@ -1958,28 +1958,6 @@ export interface Overseer extends RpcTarget {
                   formats?: MessageFormatRef[]): Promise<void>;
 
   /**
-   * Read the current durable values for state paths bound by renderUI calls in this chat. Keys are
-   * the dot paths used by {$bind: path} markers; paths that have never been bound are absent.
-   */
-  getRenderUIState(chatId: number): Promise<Record<string, JsonValue>>;
-
-  /**
-   * Update one durable renderUI state path. The path must have been declared by a successful
-   * renderUI call in this chat, and the value must retain the primitive type of its initial
-   * default.
-   */
-  updateRenderUIState(
-      chatId: number, statePath: string, value: RenderUIStateValue): Promise<void>;
-
-  /**
-   * Submit an enabled Button action from a durable renderUI tool result. The result is marked
-   * consumed, its current bound state is appended as a user-visible chat submission, and the
-   * chat's most recently-used model is resumed to handle it.
-   */
-  submitRenderUIAction(
-      chatId: number, messageSequence: number, toolCallId: string, action: string): Promise<void>;
-
-  /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to
    * send the message, likely uploading is complete. `modelId` determines whether the
    * selected provider can receive a raw file attachment.
@@ -2538,36 +2516,6 @@ export type AiChatAuthorInfo = {
   // `AuthenticatedApi.getAvatar(userId)`.
 };
 
-/** A JSON value safe to persist and send over the Workshop RPC boundary. */
-export type JsonValue = null | boolean | number | string | JsonValue[] |
-    {[key: string]: JsonValue};
-
-/** A primitive value that an interactive renderUI control can bind to and update. */
-export type RenderUIStateValue = boolean | number | string;
-
-/** A renderUI state reference. The path is resolved against that chat's durable bound state. */
-export type RenderUIBind = {$bind: string};
-
-/**
- * One validated generative-UI node. Component names and props come from the versioned Workshop
- * catalog; children are recursively validated nodes or plain text.
- */
-export type RenderUINode = {
-  type: string;
-  props: Record<string, JsonValue | RenderUIBind>;
-  children: Array<RenderUINode | string>;
-};
-
-/** The durable result of a successful renderUI tool call. */
-export type RenderUIResult = {
-  tree: RenderUINode;
-  stateDefaults: Record<string, JsonValue>;
-  catalogVersion: number;
-
-  /** Set after a Button action from this result has been submitted to an agent turn. */
-  consumed?: boolean;
-};
-
 export type AiChatMessage = {
   chatId: number;
   sequence: number;
@@ -2989,6 +2937,9 @@ export type GenerativeUiResult = {
   tree: GenerativeUiNode;
   stateDefaults: Record<string, unknown>;
   catalogVersion: number;
+
+  /** Set once the backend has accepted a Button submission from this result. */
+  consumed?: boolean;
 };
 
 /**
@@ -3136,16 +3087,6 @@ export type AiToolCall = {
 
   /** Output, if the code actually ran. (Otherwise, `error` should be present.) */
   output?: string;
-} | {
-  /** Render an ephemeral, catalog-backed interface from sandboxed JSX. */
-  toolName: "renderUI";
-  input: {
-    jsx: string;
-    state?: Record<string, JsonValue>;
-  };
-
-  /** Validated tree and initial state defaults, persisted for durable transcript rendering. */
-  output?: RenderUIResult;
 } | {
   toolName: "giveUp";
   input: {

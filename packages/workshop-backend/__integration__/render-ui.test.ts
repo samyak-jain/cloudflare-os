@@ -3,9 +3,9 @@ import {exports} from "cloudflare:workers";
 import {newWebSocketRpcSession, type RpcStub} from "capnweb";
 import type {
   AuthenticatedApi,
+  GenerativeUiResult,
   Overseer,
   PublicApi,
-  RenderUIResult,
 } from "@gadgets/workshop-shared/api";
 import {describe, expect, it} from "vitest";
 import {
@@ -74,6 +74,38 @@ describe("renderUI Dynamic Worker", () => {
     expect(JSON.stringify(result)).not.toContain("function");
   });
 
+  it("accepts the documented v1 prop spellings, aliases, and array bind paths", async () => {
+    let result = await executeRenderUI(env.LOADER, `<Stack gap="lg">
+      <Row align="BASELINE" justify="between" wrap={false}>
+        <Card title="Deploy" description="Production">
+          <Text label="Ready" tone="BRAND" size="lg" strong mono />
+          <Input value={bind("form.url")} label="URL" description="Public endpoint" type="url" />
+          <Select value={bind("form.region")} options={["iad", {value:"syd",label:"Sydney"}]} />
+          <Checkbox checked={bind("flags.0")} description="Required">Confirm</Checkbox>
+          <Slider value={bind("replicas.0")} min="1" max="10" step="1" valueLabel="replicas" />
+        </Card>
+      </Row>
+      <Table columns={["name", {key:"count",label:"Count",align:"right"}]}
+        data={[{name:"edge",count:3}]} />
+      <ProgressBar value="30" max="100" valueLabel="30%" showValue />
+      <Callout tone="success" title="Healthy" label="All checks passed" />
+      <KeyValue entries={[{label:"Region",value:"iad"}]} />
+      <Button action="deploy" label="Deploy" variant="PRIMARY" />
+    </Stack>`, {
+      form: {url: "https://example.com", region: "iad"},
+      flags: [true],
+      replicas: [3],
+    });
+
+    expect(result.tree.children).toHaveLength(6);
+    expect(result.tree.children[0]).toMatchObject({
+      type: "Row", props: {align: "baseline", justify: "between", wrap: false},
+    });
+    expect(result.tree.children[2]).toMatchObject({
+      type: "ProgressBar", props: {value: 30, max: 100, showValue: true},
+    });
+  });
+
   it("rejects unknown components and lists the catalog", async () => {
     await expect(executeRenderUI(env.LOADER, `<Marquee>Hi</Marquee>`)).rejects.toThrow(
         /Unknown renderUI component.*Allowed components:.*Stack.*KeyValue/s);
@@ -81,7 +113,7 @@ describe("renderUI Dynamic Worker", () => {
 
   it("rejects unknown and invalid props with allowed values", async () => {
     await expect(executeRenderUI(env.LOADER, `<Text color="purple">Hi</Text>`)).rejects.toThrow(
-        /unknown prop.*Allowed props: size, tone, weight, align/s);
+        /unknown prop.*Allowed props: label, tone, size, strong, mono/s);
     await expect(executeRenderUI(env.LOADER, `<Badge tone="sparkly">Hi</Badge>`)).rejects.toThrow(
         /must be one of/);
   });
@@ -178,7 +210,7 @@ describe("renderUI durable state and actions", () => {
       let impl = (instance as OverseerDurableObject & {
         impl: {
           renderUI(chatId: number, jsx: string, state: Record<string, unknown>):
-              Promise<RenderUIResult>;
+              Promise<GenerativeUiResult>;
           addChatMessages(chatId: number, author: {type: "gadget"; id: string; name: string},
               messages: unknown[]): void;
         };
@@ -202,15 +234,19 @@ describe("renderUI durable state and actions", () => {
     });
     expect(result.stateDefaults).toEqual({form: {name: "Ada"}});
 
-    expect(await workspace.getRenderUIState(chatId)).toEqual({"form.name": "Ada"});
-    await workspace.updateRenderUIState(chatId, "form.name", "Grace");
-    expect(await workspace.getRenderUIState(chatId)).toEqual({"form.name": "Grace"});
+    await workspace.setGenerativeUiState(
+        chatId, "render-call-1", {form: {name: "Grace"}});
     let before = await workspace.getChatHistory(chatId);
     let rendered = before.messages.find(message =>
       message.type === "message" && message.toolCalls?.some(call => call.toolName === "renderUI"));
     if (!rendered) throw new Error("Missing injected renderUI message.");
+    expect(rendered.type === "message" && rendered.toolCalls?.[0]).toMatchObject({
+      toolName: "renderUI",
+      output: {stateDefaults: {form: {name: "Grace"}}},
+    });
 
-    await workspace.submitRenderUIAction(chatId, rendered.sequence, "render-call-1", "save");
+    await workspace.submitGenerativeUiAction(
+        chatId, "render-call-1", "save", {form: {name: "Grace"}});
     let after = await workspace.getChatHistory(chatId);
     let frozen = after.messages.find(message => message.sequence === rendered.sequence);
     expect(frozen?.type === "message" && frozen.toolCalls?.[0]).toMatchObject({
@@ -220,7 +256,15 @@ describe("renderUI durable state and actions", () => {
     expect(after.messages.at(-1)).toMatchObject({
       author: {type: "user"},
       type: "message",
-      message: expect.stringContaining('"form.name": "Grace"'),
+      message: expect.stringContaining('"name": "Grace"'),
+    });
+
+    // A debounce that was already queued when submission started is ignored after consumption.
+    await workspace.setGenerativeUiState(chatId, "render-call-1", {form: {name: "Late"}});
+    let final = await workspace.getChatHistory(chatId);
+    let stillFrozen = final.messages.find(message => message.sequence === rendered.sequence);
+    expect(stillFrozen?.type === "message" && stillFrozen.toolCalls?.[0]).toMatchObject({
+      output: {consumed: true, stateDefaults: {form: {name: "Grace"}}},
     });
   });
 });

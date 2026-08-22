@@ -5,16 +5,17 @@
 // boundary. This keeps the dependency and trust surface small while preserving ordinary
 // JavaScript expressions inside JSX.
 
-import type {
-  JsonValue,
-  RenderUIBind,
-  RenderUINode,
-  RenderUIResult,
+import {
+  GENERATIVE_UI_CATALOG_VERSION,
+  type GenerativeUiBinding,
+  type GenerativeUiComponent,
+  type GenerativeUiNode,
+  type GenerativeUiResult,
 } from "@gadgets/workshop-shared/api";
 import type {WorkerEntrypoint} from "cloudflare:workers";
 
 /** Version of the backend/frontend renderUI component catalog and validation contract. */
-export const RENDER_UI_CATALOG_VERSION = 1;
+export const RENDER_UI_CATALOG_VERSION = GENERATIVE_UI_CATALOG_VERSION;
 
 /** Maximum UTF-8 size of JSX accepted from a model. */
 export const MAX_RENDER_UI_SOURCE_BYTES = 64 * 1024;
@@ -25,15 +26,19 @@ export const MAX_RENDER_UI_TREE_BYTES = 256 * 1024;
 const MAX_RENDER_UI_STATE_BYTES = 64 * 1024;
 const RENDER_UI_CPU_MS = 1_000;
 
+type JsonValue = null | boolean | number | string | JsonValue[] | {[key: string]: JsonValue};
+
 type StringSchema = {
   type: "string";
   enum?: string[];
   minLength?: number;
   maxLength?: number;
+  caseInsensitive?: boolean;
 };
-type NumberSchema = {type: "number"; min?: number; max?: number};
+type NumberSchema = {type: "number"; min?: number; max?: number; coerce?: boolean};
 type BooleanSchema = {type: "boolean"};
 type ScalarSchema = {type: "scalar"};
+type UnionSchema = {type: "union"; variants: ValueSchema[]};
 type ArraySchema = {type: "array"; items: ValueSchema; maxLength?: number};
 type ObjectSchema = {
   type: "object";
@@ -41,7 +46,7 @@ type ObjectSchema = {
 };
 type RecordSchema = {type: "record"; values: ValueSchema};
 type ValueSchema = StringSchema | NumberSchema | BooleanSchema | ScalarSchema |
-    ArraySchema | ObjectSchema | RecordSchema;
+    UnionSchema | ArraySchema | ObjectSchema | RecordSchema;
 type PropSchema = {schema: ValueSchema; optional?: boolean; bindable?: boolean};
 type ComponentSchema = {children: boolean; props: Record<string, PropSchema>};
 
@@ -54,151 +59,163 @@ const optional = (schema: ValueSchema, bindable = false): PropSchema =>
   ({schema, optional: true, ...(bindable ? {bindable: true} : {})});
 const required = (schema: ValueSchema): PropSchema => ({schema});
 
-const spacing = string({enum: ["none", "xs", "sm", "md", "lg", "xl"]});
-const tone = string({enum: ["neutral", "info", "success", "warning", "danger"]});
-const align = string({enum: ["start", "center", "end", "stretch"]});
+const choice = (values: string[]): StringSchema =>
+  string({enum: values, caseInsensitive: true});
+const numeric = (options: Omit<NumberSchema, "type" | "coerce"> = {}): NumberSchema =>
+  number({...options, coerce: true});
+const text = string({maxLength: 4_096});
+const label = string({maxLength: 256});
+const spacing = choice(["none", "xs", "sm", "md", "lg"]);
+const stringOrNumber: UnionSchema = {type: "union", variants: [string(), numeric()]};
+const selectOptions: ArraySchema = {
+  type: "array", maxLength: 200,
+  items: {
+    type: "union",
+    variants: [string(), {
+      type: "object",
+      fields: {
+        value: {schema: string()},
+        label: {schema: label, optional: true},
+      },
+    }],
+  },
+};
+const tableRows: ArraySchema = {
+  type: "array", maxLength: 1_000,
+  items: {type: "record", values: {type: "scalar"}},
+};
+const keyValueItems: ArraySchema = {
+  type: "array", maxLength: 500,
+  items: {
+    type: "object",
+    fields: {
+      label: {schema: label},
+      value: {schema: {type: "scalar"}, optional: true},
+    },
+  },
+};
 
 /**
  * Strict backend validation catalog. It is data (rather than executable validators) so the same
  * schema can be embedded byte-for-byte in each fresh Dynamic Worker isolate.
  */
 export const RENDER_UI_CATALOG: Record<string, ComponentSchema> = {
-  Stack: {
-    children: true,
-    props: {
-      gap: optional(spacing), align: optional(align), padding: optional(spacing),
-    },
-  },
+  Stack: {children: true, props: {gap: optional(spacing)}},
   Row: {
     children: true,
     props: {
-      gap: optional(spacing), align: optional(align),
-      justify: optional(string({enum: ["start", "center", "end", "between", "around"]})),
+      gap: optional(spacing),
+      align: optional(choice(["start", "center", "end", "baseline"])),
+      justify: optional(choice(["start", "center", "end", "between"])),
       wrap: optional(boolean),
     },
   },
   Card: {
     children: true,
     props: {
-      title: optional(string({maxLength: 256})), padding: optional(spacing),
-      tone: optional(tone),
+      title: optional(label), subtitle: optional(label), description: optional(label),
     },
   },
   Text: {
     children: true,
     props: {
-      size: optional(string({enum: ["xs", "sm", "md", "lg"]})), tone: optional(tone),
-      weight: optional(string({enum: ["normal", "medium", "semibold", "bold"]})),
-      align: optional(string({enum: ["start", "center", "end"]})),
+      label: optional(text),
+      tone: optional(choice(["default", "subtle", "muted", "brand", "success", "warning", "danger"])),
+      size: optional(choice(["sm", "md", "lg"])),
+      strong: optional(boolean), mono: optional(boolean),
     },
   },
   Heading: {
     children: true,
+    props: {label: optional(text), level: optional(numeric({min: 1, max: 3}))},
+  },
+  Badge: {
+    children: true,
     props: {
-      level: optional(number({min: 1, max: 6})), tone: optional(tone),
-      align: optional(string({enum: ["start", "center", "end"]})),
+      label: optional(text),
+      tone: optional(choice(["neutral", "brand", "success", "warning", "danger", "info"])),
     },
   },
-  Badge: {children: true, props: {tone: optional(tone)}},
-  Divider: {
-    children: false,
-    props: {orientation: optional(string({enum: ["horizontal", "vertical"]}))},
-  },
+  Divider: {children: false, props: {}},
   Button: {
     children: true,
     props: {
       action: required(string({minLength: 1, maxLength: 128})),
-      variant: optional(string({enum: ["primary", "secondary", "ghost", "danger"]})),
-      disabled: optional(boolean),
+      label: optional(text),
+      variant: optional(choice(["primary", "secondary", "danger"])), disabled: optional(boolean),
     },
   },
   Input: {
     children: false,
     props: {
-      label: optional(string({maxLength: 256})), value: optional(string(), true),
-      placeholder: optional(string({maxLength: 512})), name: optional(string({maxLength: 128})),
-      type: optional(string({enum: ["text", "email", "number", "search"]})),
-      disabled: optional(boolean),
+      value: optional(stringOrNumber, true), label: optional(label),
+      placeholder: optional(string({maxLength: 512})),
+      description: optional(string({maxLength: 512})), hint: optional(string({maxLength: 512})),
+      type: optional(choice(["text", "number", "email", "url", "search", "tel", "password"])),
     },
   },
   Select: {
     children: false,
     props: {
-      label: optional(string({maxLength: 256})), value: optional(string(), true),
-      options: required({
-        type: "array", maxLength: 200,
-        items: {
-          type: "object",
-          fields: {label: {schema: string({maxLength: 256})}, value: {schema: string()}},
-        },
-      }),
-      placeholder: optional(string({maxLength: 512})), name: optional(string({maxLength: 128})),
-      disabled: optional(boolean),
+      value: optional(string(), true), options: optional(selectOptions),
+      label: optional(label), placeholder: optional(string({maxLength: 512})),
     },
   },
   Checkbox: {
-    children: false,
+    children: true,
     props: {
-      label: optional(string({maxLength: 256})), checked: optional(boolean, true),
-      name: optional(string({maxLength: 128})), disabled: optional(boolean),
+      checked: optional(boolean, true), label: optional(label),
+      description: optional(string({maxLength: 512})),
     },
   },
   Slider: {
     children: false,
     props: {
-      label: optional(string({maxLength: 256})), value: optional(number(), true),
-      min: optional(number()), max: optional(number()), step: optional(number({min: 0})),
-      name: optional(string({maxLength: 128})), disabled: optional(boolean),
+      value: optional(numeric(), true), min: optional(numeric()), max: optional(numeric()),
+      step: optional(numeric({min: 0})), label: optional(label), valueLabel: optional(label),
     },
   },
   Table: {
     children: false,
     props: {
-      columns: required({
+      columns: optional({
         type: "array", maxLength: 100,
         items: {
-          type: "object",
-          fields: {
-            key: {schema: string({minLength: 1, maxLength: 128})},
-            label: {schema: string({maxLength: 256})},
-            align: {
-              schema: string({enum: ["start", "center", "end"]}), optional: true,
+          type: "union",
+          variants: [string({minLength: 1, maxLength: 128}), {
+            type: "object",
+            fields: {
+              key: {schema: string({minLength: 1, maxLength: 128})},
+              label: {schema: label, optional: true},
+              align: {schema: choice(["left", "right"]), optional: true},
             },
-          },
+          }],
         },
       }),
-      rows: required({type: "array", maxLength: 1_000, items: {
-        type: "record", values: {type: "scalar"},
-      }}),
-      caption: optional(string({maxLength: 512})),
+      rows: optional(tableRows), data: optional(tableRows), items: optional(tableRows),
     },
   },
   ProgressBar: {
     children: false,
     props: {
-      value: required(number({min: 0})), max: optional(number({min: 0})),
-      label: optional(string({maxLength: 256})), tone: optional(tone),
+      value: optional(numeric({min: 0})), max: optional(numeric({min: 0})),
+      label: optional(label), valueLabel: optional(label), showValue: optional(boolean),
     },
   },
   Callout: {
     children: true,
-    props: {title: optional(string({maxLength: 256})), tone: optional(tone)},
+    props: {
+      label: optional(text), title: optional(label),
+      tone: optional(choice(["info", "success", "warning", "danger"])),
+    },
   },
   KeyValue: {
     children: false,
     props: {
-      items: required({
-        type: "array", maxLength: 500,
-        items: {
-          type: "object",
-          fields: {
-            key: {schema: string({maxLength: 256})}, value: {schema: {type: "scalar"}},
-          },
-        },
-      }),
+      items: optional(keyValueItems), entries: optional(keyValueItems), pairs: optional(keyValueItems),
     },
   },
-};
+} satisfies Record<GenerativeUiComponent, ComponentSchema>;
 
 function sourceByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -514,7 +531,11 @@ function statePaths(state) {
   }
   let paths = new Map();
   function visit(value, path) {
-    if (plainObject(value)) {
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index++) {
+        visit(value[index], path ? path + "." + index : String(index));
+      }
+    } else if (plainObject(value)) {
       for (let [key, child] of Object.entries(value)) {
         if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) || BLOCKED_KEYS.has(key)) {
           throw new Error("Invalid renderUI state key " + JSON.stringify(key) + ".");
@@ -531,6 +552,7 @@ function statePaths(state) {
 
 function schemaName(schema) {
   if (schema.type === "string" && schema.enum) return schema.enum.map(JSON.stringify).join(" | ");
+  if (schema.type === "union") return schema.variants.map(schemaName).join(" or ");
   if (schema.type === "array") return "array";
   if (schema.type === "object" || schema.type === "record") return "object";
   if (schema.type === "scalar") return "string, number, boolean, or null";
@@ -539,7 +561,7 @@ function schemaName(schema) {
 
 function validateValue(value, schema, path) {
   switch (schema.type) {
-    case "string":
+    case "string": {
       if (typeof value !== "string") throw new Error(path + " must be a string.");
       if (schema.minLength !== undefined && value.length < schema.minLength) {
         throw new Error(path + " must not be empty.");
@@ -547,13 +569,23 @@ function validateValue(value, schema, path) {
       if (schema.maxLength !== undefined && value.length > schema.maxLength) {
         throw new Error(path + " exceeds its " + schema.maxLength + "-character limit.");
       }
-      if (schema.enum && !schema.enum.includes(value)) {
-        throw new Error(path + " must be one of: " + schemaName(schema) + ".");
+      if (schema.enum) {
+        let matched = schema.caseInsensitive
+          ? schema.enum.find(candidate => candidate.toLowerCase() === value.toLowerCase())
+          : schema.enum.find(candidate => candidate === value);
+        if (matched === undefined) {
+          throw new Error(path + " must be one of: " + schemaName(schema) + ".");
+        }
+        value = matched;
       }
       return value;
-    case "number":
+    }
+    case "number": {
+      if (schema.coerce && typeof value === "string" && value.trim() !== "") {
+        value = Number(value);
+      }
       if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new Error(path + " must be a finite number.");
+        throw new Error(path + " must be a finite number or numeric string.");
       }
       if (schema.min !== undefined && value < schema.min) {
         throw new Error(path + " must be at least " + schema.min + ".");
@@ -562,6 +594,7 @@ function validateValue(value, schema, path) {
         throw new Error(path + " must be at most " + schema.max + ".");
       }
       return value;
+    }
     case "boolean":
       if (typeof value !== "boolean") throw new Error(path + " must be a boolean.");
       return value;
@@ -573,6 +606,17 @@ function validateValue(value, schema, path) {
         throw new Error(path + " must be finite.");
       }
       return value;
+    case "union": {
+      let errors = [];
+      for (let variant of schema.variants) {
+        try {
+          return validateValue(value, variant, path);
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      throw new Error(path + " must match " + schemaName(schema) + ". " + errors.join(" "));
+    }
     case "array":
       if (!Array.isArray(value)) throw new Error(path + " must be an array.");
       if (schema.maxLength !== undefined && value.length > schema.maxLength) {
@@ -745,14 +789,14 @@ function assertJsonValue(value: unknown, path: string, depth = 0): asserts value
   }
 }
 
-function assertBind(value: unknown, path: string): asserts value is RenderUIBind {
+function assertBind(value: unknown, path: string): asserts value is GenerativeUiBinding {
   if (!isPlainRecord(value) || Object.keys(value).length !== 1 ||
       typeof value.$bind !== "string") {
     throw new Error(`${path} contains an invalid bind marker.`);
   }
 }
 
-function assertNode(value: unknown, path: string, depth = 0): asserts value is RenderUINode {
+function assertNode(value: unknown, path: string, depth = 0): asserts value is GenerativeUiNode {
   if (depth > 64 || !isPlainRecord(value) || typeof value.type !== "string" ||
       !isPlainRecord(value.props) || !Array.isArray(value.children)) {
     throw new Error(`${path} is not a valid renderUI node.`);
@@ -769,7 +813,7 @@ function assertNode(value: unknown, path: string, depth = 0): asserts value is R
   });
 }
 
-function assertRenderUIResult(value: unknown): asserts value is RenderUIResult {
+function assertRenderUIResult(value: unknown): asserts value is GenerativeUiResult {
   if (!isPlainRecord(value) || value.catalogVersion !== RENDER_UI_CATALOG_VERSION ||
       !isPlainRecord(value.stateDefaults)) {
     throw new Error("The renderUI isolate returned an invalid result envelope.");
@@ -781,7 +825,7 @@ function assertRenderUIResult(value: unknown): asserts value is RenderUIResult {
 /** Execute transformed JSX in a fresh, outbound-disabled Dynamic Worker and return its tree. */
 export async function executeRenderUI(
     loader: WorkerLoader, jsxSource: string,
-    stateDefaults: Record<string, unknown> = {}): Promise<RenderUIResult> {
+    stateDefaults: Record<string, unknown> = {}): Promise<GenerativeUiResult> {
   assertJsonValue(stateDefaults, "state");
   let transformed = transformRenderUIJsx(jsxSource);
   let worker: WorkerLoaderWorkerCode = {
@@ -835,9 +879,9 @@ export async function executeRenderUI(
 }
 
 /** Return every {$bind:path} marker used by a validated renderUI tree. */
-export function listRenderUIBindPaths(tree: RenderUINode): string[] {
+export function listRenderUIBindPaths(tree: GenerativeUiNode): string[] {
   let paths = new Set<string>();
-  function visit(node: RenderUINode) {
+  function visit(node: GenerativeUiNode) {
     for (let value of Object.values(node.props)) {
       if (isPlainRecord(value) && typeof value.$bind === "string") paths.add(value.$bind);
     }
@@ -849,17 +893,124 @@ export function listRenderUIBindPaths(tree: RenderUINode): string[] {
 
 /** Resolve a dot path from validated renderUI state defaults. */
 export function renderUIStateValue(
-    state: Record<string, JsonValue>, statePath: string): JsonValue | undefined {
-  let value: JsonValue = state;
+    state: Record<string, unknown>, statePath: string): unknown {
+  let value: unknown = state;
   for (let part of statePath.split(".")) {
-    if (!isPlainRecord(value) || !(part in value)) return undefined;
-    value = value[part] as JsonValue;
+    if (Array.isArray(value)) {
+      let index = Number(part);
+      if (!Number.isInteger(index) || index < 0 || index >= value.length) return undefined;
+      value = value[index];
+    } else if (isPlainRecord(value) && part in value) {
+      value = value[part];
+    } else {
+      return undefined;
+    }
   }
   return value;
 }
 
+function validateBoundStateValue(value: unknown, schema: ValueSchema, path: string): void {
+  if (schema.type === "union") {
+    let errors: unknown[] = [];
+    for (let variant of schema.variants) {
+      try {
+        validateBoundStateValue(value, variant, path);
+        return;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    throw new Error(`${path} does not match its bound control type: ` +
+        errors.map(error => error instanceof Error ? error.message : String(error)).join(" "));
+  }
+  if (schema.type === "string") {
+    if (typeof value !== "string") throw new Error(`${path} must be a string.`);
+    if (schema.minLength !== undefined && value.length < schema.minLength) {
+      throw new Error(`${path} is too short.`);
+    }
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+      throw new Error(`${path} is too long.`);
+    }
+    if (schema.enum && !schema.enum.some(candidate => schema.caseInsensitive
+      ? candidate.toLowerCase() === value.toLowerCase() : candidate === value)) {
+      throw new Error(`${path} must be one of: ${schema.enum.join(", ")}.`);
+    }
+    return;
+  }
+  if (schema.type === "number") {
+    let numericValue = schema.coerce && typeof value === "string" && value.trim() !== ""
+      ? Number(value) : value;
+    if (typeof numericValue !== "number" || !Number.isFinite(numericValue)) {
+      throw new Error(`${path} must be a finite number or numeric string.`);
+    }
+    if (schema.min !== undefined && numericValue < schema.min) {
+      throw new Error(`${path} must be at least ${schema.min}.`);
+    }
+    if (schema.max !== undefined && numericValue > schema.max) {
+      throw new Error(`${path} must be at most ${schema.max}.`);
+    }
+    return;
+  }
+  if (schema.type === "boolean") {
+    if (typeof value !== "boolean") throw new Error(`${path} must be a boolean.`);
+    return;
+  }
+  throw new Error(`${path} uses an unsupported bound state schema.`);
+}
+
+/** Validate one whole-state mirror against the bindings in a previously validated tree. */
+export function validateRenderUIState(
+    tree: GenerativeUiNode, state: Record<string, unknown>): void {
+  assertJsonValue(state, "state");
+  if (sourceByteLength(JSON.stringify(state)) > MAX_RENDER_UI_STATE_BYTES) {
+    throw new Error(`renderUI state exceeds the ${MAX_RENDER_UI_STATE_BYTES}-byte limit.`);
+  }
+  function visit(node: GenerativeUiNode) {
+    let component = RENDER_UI_CATALOG[node.type];
+    if (!component) throw new Error(`Unknown renderUI component ${JSON.stringify(node.type)}.`);
+    for (let [name, marker] of Object.entries(node.props)) {
+      if (!isPlainRecord(marker) || typeof marker.$bind !== "string") continue;
+      let prop = component.props[name];
+      if (!prop?.bindable) {
+        throw new Error(`${node.type}.${name} is not a bindable renderUI prop.`);
+      }
+      let value = renderUIStateValue(state, marker.$bind);
+      if (value === undefined) {
+        throw new Error(`Missing renderUI state path ${JSON.stringify(marker.$bind)}.`);
+      }
+      validateBoundStateValue(value, prop.schema, `state.${marker.$bind}`);
+    }
+    for (let child of node.children) if (typeof child !== "string") visit(child);
+  }
+  visit(tree);
+}
+
+/** Replace an existing dot path in a validated whole-state object. */
+export function setRenderUIStateValue(
+    state: Record<string, unknown>, statePath: string, value: string | number | boolean): void {
+  let parts = statePath.split(".");
+  let cursor: unknown = state;
+  for (let index = 0; index < parts.length; index++) {
+    let part = parts[index];
+    let last = index === parts.length - 1;
+    if (Array.isArray(cursor)) {
+      let arrayIndex = Number(part);
+      if (!Number.isInteger(arrayIndex) || arrayIndex < 0 || arrayIndex >= cursor.length) {
+        throw new Error(`Unknown renderUI state path ${JSON.stringify(statePath)}.`);
+      }
+      if (last) cursor[arrayIndex] = value;
+      else cursor = cursor[arrayIndex];
+    } else if (isPlainRecord(cursor) && part in cursor) {
+      if (last) cursor[part] = value;
+      else cursor = cursor[part];
+    } else {
+      throw new Error(`Unknown renderUI state path ${JSON.stringify(statePath)}.`);
+    }
+  }
+}
+
 /** Whether a validated tree contains an enabled Button with the requested action. */
-export function hasRenderUIButtonAction(tree: RenderUINode, action: string): boolean {
+export function hasRenderUIButtonAction(tree: GenerativeUiNode, action: string): boolean {
   if (tree.type === "Button" && tree.props.action === action && tree.props.disabled !== true) {
     return true;
   }
@@ -868,13 +1019,13 @@ export function hasRenderUIButtonAction(tree: RenderUINode, action: string): boo
 }
 
 /** Count component nodes for the compact model-facing renderUI success summary. */
-export function countRenderUINodes(tree: RenderUINode): number {
+export function countRenderUINodes(tree: GenerativeUiNode): number {
   return 1 + tree.children.reduce((count, child) =>
     count + (typeof child === "string" ? 0 : countRenderUINodes(child)), 0);
 }
 
 /** Build the compact success text shown to the model for live calls and history replay. */
-export function summarizeRenderUIResult(result: RenderUIResult): string {
+export function summarizeRenderUIResult(result: GenerativeUiResult): string {
   let nodes = countRenderUINodes(result.tree);
   let binds = listRenderUIBindPaths(result.tree).length;
   return `Rendered ${nodes} catalog component${nodes === 1 ? "" : "s"} ` +

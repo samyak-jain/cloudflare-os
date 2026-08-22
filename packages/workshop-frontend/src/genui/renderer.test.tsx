@@ -191,12 +191,13 @@ const CATALOG_CASES: Record<string, { node: GenerativeUiNode; expect: (host: HTM
 
 describe("catalog", () => {
   it("covers every component the contract names", () => {
-    expect(Object.keys(CATALOG_CASES).sort()).toEqual([...GENERATIVE_UI_CATALOG].sort());
+    expect(Object.keys(CATALOG_CASES).toSorted()).toEqual(GENERATIVE_UI_CATALOG.toSorted());
   });
 
   for (const name of GENERATIVE_UI_CATALOG) {
     it(`renders ${name}`, () => {
       const testCase = CATALOG_CASES[name];
+      expect(testCase).toBeDefined();
       render(
         <GenerativeUiCard
           toolCallId="call-1"

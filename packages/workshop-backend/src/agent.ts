@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type RenderUIResult, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type GenerativeUiResult, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, replaceSpanChange, type CodeContent, type CodeChange }
   from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -468,7 +468,7 @@ export interface AgentHooks {
   /** Execute and durably initialize a renderUI expression for this chat. */
   renderUI(
       chatId: number, jsx: string,
-      stateDefaults: Record<string, unknown>): Promise<RenderUIResult>;
+      stateDefaults: Record<string, unknown>): Promise<GenerativeUiResult>;
   activeAgentCallbackCount(chatId: number): number;
   rejectAllAgentCallbacks(chatId: number, error: string): void;
   consumeCapturedActions(chatId: number)
@@ -1693,13 +1693,6 @@ export async function runAgent(
                 case "listConnectableResources":
                 case "requestConnection":
                   toolOutput = {text: toolCall.output ?? ""};
-                  break;
-                case "renderUI":
-                  // The validated tree, as the live tool returned it. Replaying the *tree* rather
-                  // than the JSX the model wrote is deliberate: the sandbox may have rejected or
-                  // normalized parts of it, and what the user saw is what the agent should
-                  // remember composing. See the renderUI tool implementation.
-                  toolOutput = {text: jsonToolResultText(toolCall.output ?? {})};
                   break;
                 default:
                   toolCall satisfies never;

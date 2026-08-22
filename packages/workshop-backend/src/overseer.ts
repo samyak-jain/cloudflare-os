@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, type JsonValue, type RenderUIResult, type RenderUIStateValue } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, type AiToolCall, type GenerativeUiResult } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, composeCodeChange, diffFiles, transformCodeChange,
   validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -76,6 +76,8 @@ import {
   hasRenderUIButtonAction,
   listRenderUIBindPaths,
   renderUIStateValue,
+  setRenderUIStateValue,
+  validateRenderUIState,
 } from "./render-ui";
 
 const logger = createWorkshopLogger("workshop.overseer");
@@ -840,8 +842,7 @@ type ChatModelDataRecord = {
 type RenderUIStateRecord = {
   chatId: number;
   statePath: string;
-  value: JsonValue;
-  valueType: "string" | "number" | "boolean";
+  value: string | number | boolean;
 };
 
 function renderUIStateKey(chatId: number, statePath: string): string {
@@ -7585,68 +7586,39 @@ class OverseerImpl implements AgentHooks {
 
   async renderUI(
       chatId: number, jsx: string,
-      stateDefaults: Record<string, unknown>): Promise<RenderUIResult> {
+      stateDefaults: Record<string, unknown>): Promise<GenerativeUiResult> {
     if (!this.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
     let result = await executeRenderUI(this.env.LOADER, jsx, stateDefaults);
     if (!this.storage.chatMeta.get(chatId)) {
       throw new Error("The chat was deleted while renderUI was executing.");
     }
 
-    // Only paths actually referenced by a validated bind marker enter durable state. A later card
-    // may reuse a path, but cannot silently change its primitive type or reset the user's value.
+    // Only paths actually referenced by a validated bind marker enter durable state. Reusing a
+    // path in a later card carries its current chat-scoped value forward into that card's durable
+    // defaults, then validates it against the new control before anything is committed.
+    let effectiveState = structuredClone(result.stateDefaults);
+    let initialValues = new Map<string, string | number | boolean>();
+    for (let statePath of listRenderUIBindPaths(result.tree)) {
+      let defaultValue = renderUIStateValue(effectiveState, statePath);
+      if (typeof defaultValue !== "string" && typeof defaultValue !== "number" &&
+          typeof defaultValue !== "boolean") {
+        throw new Error(`renderUI bind path ${JSON.stringify(statePath)} is not primitive.`);
+      }
+      let existing = this.storage.renderUIState.get(renderUIStateKey(chatId, statePath));
+      if (existing) setRenderUIStateValue(effectiveState, statePath, existing.value);
+      else initialValues.set(statePath, defaultValue);
+    }
+    validateRenderUIState(result.tree, effectiveState);
+    result.stateDefaults = effectiveState;
+
     this.ctx.storage.transactionSync(() => {
-      for (let statePath of listRenderUIBindPaths(result.tree)) {
-        let defaultValue = renderUIStateValue(result.stateDefaults, statePath);
-        if (typeof defaultValue !== "string" && typeof defaultValue !== "number" &&
-            typeof defaultValue !== "boolean") {
-          // The isolate's bindable prop schemas already guarantee this. Keep the parent fail-closed
-          // if the vendored runtime and this storage contract ever drift.
-          throw new Error(`renderUI bind path ${JSON.stringify(statePath)} is not primitive.`);
-        }
-        let valueType = typeof defaultValue as RenderUIStateRecord["valueType"];
-        let existing = this.storage.renderUIState.get(renderUIStateKey(chatId, statePath));
-        if (existing) {
-          if (existing.valueType !== valueType) {
-            throw new Error(`renderUI bind path ${JSON.stringify(statePath)} was previously ` +
-                `initialized as ${existing.valueType}; it cannot be reused as ${valueType}.`);
-          }
-          continue;
-        }
+      for (let [statePath, value] of initialValues) {
         this.storage.renderUIState.put({
-          chatId,
-          statePath,
-          value: defaultValue,
-          valueType,
+          chatId, statePath, value,
         });
       }
     });
     return result;
-  }
-
-  getRenderUIState(chatId: number): Record<string, JsonValue> {
-    if (!this.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
-    return Object.fromEntries([...this.storage.renderUIState.list({
-      prefix: `${keyString(chatId)}.`,
-    })].map(record => [record.statePath, record.value]));
-  }
-
-  updateRenderUIState(chatId: number, statePath: string, value: RenderUIStateValue): void {
-    if (!this.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
-    let key = renderUIStateKey(chatId, statePath);
-    let record = this.storage.renderUIState.get(key);
-    if (!record) {
-      let allowed = [...this.storage.renderUIState.list({prefix: `${keyString(chatId)}.`})]
-          .map(entry => entry.statePath).join(", ") || "(none)";
-      throw new Error(`Unknown renderUI state path ${JSON.stringify(statePath)}. ` +
-          `Allowed paths: ${allowed}.`);
-    }
-    if (typeof value !== record.valueType ||
-        (typeof value === "number" && !Number.isFinite(value))) {
-      throw new Error(`renderUI state path ${JSON.stringify(statePath)} requires a ` +
-          `${record.valueType} value.`);
-    }
-    record.value = value;
-    this.storage.renderUIState.put(record);
   }
 
   async executeCodeMode(chatId: number, code: string,
@@ -10226,22 +10198,83 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // agent sees it the next time the user sends a message (see the connectionRequest history case).
   }
 
-  // ── renderUI (generative UI) ──────────────────────────────────────────────────────────────────
-  //
-  // Declared here so the frontend's card has a typed surface to call; the storage and the
-  // input-event delivery behind them land with the renderUI tool itself, in the backend change.
-  // They throw rather than no-op on purpose: a card that reports "Submitted" for a submission the
-  // agent never received would be a worse failure than a visible one.
+  #findGenerativeUiCall(chatId: number, toolCallId: string): {
+    message: Extract<AiChatMessage, {type: "message"}>;
+    toolCall: Extract<AiToolCall, {toolName: "renderUI"}>;
+  } {
+    if (!this.impl.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
+    for (let message of this.impl.storage.chats.list(
+        {prefix: `${keyString(chatId)}.`, reverse: true})) {
+      if (message.type !== "message") continue;
+      let toolCall = message.toolCalls?.find(call =>
+        call.toolCallId === toolCallId && call.toolName === "renderUI");
+      if (toolCall?.toolName === "renderUI" && toolCall.output) return {message, toolCall};
+    }
+    throw new Error(`No such renderUI tool result: ${toolCallId}`);
+  }
+
+  #prepareGenerativeUiState(
+      chatId: number, toolCall: Extract<AiToolCall, {toolName: "renderUI"}>,
+      state: Record<string, unknown>): {
+        state: Record<string, unknown>;
+        records: RenderUIStateRecord[];
+      } {
+    if (!toolCall.output) throw new Error("The renderUI tool call has no result.");
+    validateRenderUIState(toolCall.output.tree, state);
+    let durableState = structuredClone(state);
+    let records = listRenderUIBindPaths(toolCall.output.tree).map(statePath => {
+      let value = renderUIStateValue(durableState, statePath);
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        throw new Error(`renderUI bind path ${JSON.stringify(statePath)} is not primitive.`);
+      }
+      return {chatId, statePath, value};
+    });
+    return {state: durableState, records};
+  }
 
   async setGenerativeUiState(
-      _chatId: number, _toolCallId: string, _state: Record<string, unknown>): Promise<void> {
-    throw new Error("Not implemented: generative-UI state is part of the renderUI backend change.");
+      chatId: number, toolCallId: string, state: Record<string, unknown>): Promise<void> {
+    let {message, toolCall} = this.#findGenerativeUiCall(chatId, toolCallId);
+    // A delayed debounce is harmless after submission. It must not rewrite the state the agent
+    // consumed or make the frozen card look editable again on reload.
+    if (toolCall.output?.consumed) return;
+    let prepared = this.#prepareGenerativeUiState(chatId, toolCall, state);
+    this.impl.ctx.storage.transactionSync(() => {
+      for (let record of prepared.records) this.impl.storage.renderUIState.put(record);
+      toolCall.output!.stateDefaults = prepared.state;
+      message.timestamp = this.impl.getChatTimestamp();
+      this.impl.storage.chats.put(message);
+    });
   }
 
   async submitGenerativeUiAction(
-      _chatId: number, _toolCallId: string, _action: string,
-      _state: Record<string, unknown>): Promise<void> {
-    throw new Error("Not implemented: generative-UI submission is part of the renderUI backend change.");
+      chatId: number, toolCallId: string, action: string,
+      state: Record<string, unknown>): Promise<void> {
+    let author = await this.#getClientProfile();
+    this.impl.assertChatNotActive(chatId);
+    let {message, toolCall} = this.#findGenerativeUiCall(chatId, toolCallId);
+    if (toolCall.output?.consumed) {
+      throw new Error("This renderUI form has already been submitted.");
+    }
+    if (!toolCall.output || !hasRenderUIButtonAction(toolCall.output.tree, action)) {
+      throw new Error(`No enabled Button allows renderUI action ${JSON.stringify(action)}.`);
+    }
+    let prepared = this.#prepareGenerativeUiState(chatId, toolCall, state);
+    let submission = `Submitted interface action ${JSON.stringify(action)}.`;
+    if (Object.keys(prepared.state).length > 0) {
+      submission += `\n\nCurrent interface state:\n\`\`\`json\n` +
+          `${JSON.stringify(prepared.state, null, 2)}\n\`\`\``;
+    }
+
+    this.impl.ctx.storage.transactionSync(() => {
+      for (let record of prepared.records) this.impl.storage.renderUIState.put(record);
+      toolCall.output!.stateDefaults = prepared.state;
+      toolCall.output!.consumed = true;
+      message.timestamp = this.impl.getChatTimestamp();
+      this.impl.storage.chats.put(message);
+      this.impl.addChatMessages(chatId, author, [{type: "message", message: submission}]);
+    });
+    await this.#resumeSuspendedAgent(chatId);
   }
 
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
@@ -10517,57 +10550,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.sendChatMessage(
         this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
-  }
-
-  async getRenderUIState(chatId: number): Promise<Record<string, JsonValue>> {
-    return this.impl.getRenderUIState(chatId);
-  }
-
-  async updateRenderUIState(
-      chatId: number, statePath: string, value: RenderUIStateValue): Promise<void> {
-    this.impl.updateRenderUIState(chatId, statePath, value);
-  }
-
-  async submitRenderUIAction(
-      chatId: number, messageSequence: number, toolCallId: string,
-      action: string): Promise<void> {
-    let author = await this.#getClientProfile();
-    this.impl.assertChatNotActive(chatId);
-    let message = this.impl.storage.chats.get(
-        `${keyString(chatId)}.${keyString(messageSequence)}`);
-    if (!message || message.type !== "message" || message.chatId !== chatId) {
-      throw new Error("No such renderUI message.");
-    }
-    let toolCall = message.toolCalls?.find(call =>
-      call.toolCallId === toolCallId && call.toolName === "renderUI");
-    if (!toolCall || toolCall.toolName !== "renderUI" || !toolCall.output) {
-      throw new Error("No such renderUI tool result.");
-    }
-    if (toolCall.output.consumed) {
-      throw new Error("This renderUI form has already been submitted.");
-    }
-    if (!hasRenderUIButtonAction(toolCall.output.tree, action)) {
-      throw new Error(`No enabled Button allows renderUI action ${JSON.stringify(action)}.`);
-    }
-
-    let chatState = this.impl.getRenderUIState(chatId);
-    let state = Object.fromEntries(listRenderUIBindPaths(toolCall.output.tree).map(statePath =>
-      [statePath, chatState[statePath]]));
-    let submission = `Submitted interface action ${JSON.stringify(action)}.`;
-    if (Object.keys(state).length > 0) {
-      submission += `\n\nCurrent interface state:\n\`\`\`json\n` +
-          `${JSON.stringify(state, null, 2)}\n\`\`\``;
-    }
-
-    // Freeze the card and append the user submission together. The timestamp bump re-delivers
-    // the mutated historical message to offline/live subscribers, as for connection requests.
-    this.impl.ctx.storage.transactionSync(() => {
-      toolCall.output!.consumed = true;
-      message.timestamp = this.impl.getChatTimestamp();
-      this.impl.storage.chats.put(message);
-      this.impl.addChatMessages(chatId, author, [{type: "message", message: submission}]);
-    });
-    await this.#resumeSuspendedAgent(chatId);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -11211,12 +11193,6 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
                         _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> {
     this.#deny();
   }
-  async getRenderUIState(_chatId: number): Promise<Record<string, JsonValue>> { this.#deny(); }
-  async updateRenderUIState(
-      _chatId: number, _statePath: string, _value: RenderUIStateValue): Promise<void> { this.#deny(); }
-  async submitRenderUIAction(
-      _chatId: number, _messageSequence: number, _toolCallId: string,
-      _action: string): Promise<void> { this.#deny(); }
   async uploadChatAttachment(
     _attachment: ChatAttachmentUpload,
     _modelId: string | null,
