@@ -103,7 +103,7 @@ export type ModelHandle = {
   lastResponse?: { status: number; aiGatewayLogId?: string };
 
   /** Deployment-owned transport settings when this chat is driven by Hermes. */
-  hermes?: { baseUrl: string; apiKey: string };
+  hermes?: { baseUrl: string; apiKey: string; localToolTimeoutMs?: number };
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -538,6 +538,15 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string,
         throw new Error("HERMES_BASE_URL must use HTTPS. Local development may explicitly set " +
             "HERMES_ALLOW_INSECURE_LOOPBACK=true for a loopback HTTP URL.");
       }
+      let localToolTimeoutMs = env?.HERMES_LOCAL_TOOL_TIMEOUT_MS === undefined
+        ? undefined
+        : Number(env.HERMES_LOCAL_TOOL_TIMEOUT_MS);
+      if (localToolTimeoutMs !== undefined &&
+          (!Number.isInteger(localToolTimeoutMs) || localToolTimeoutMs < 1_000 ||
+           localToolTimeoutMs > 30 * 60_000)) {
+        throw new Error(
+            "HERMES_LOCAL_TOOL_TIMEOUT_MS must be an integer between 1000 and 1800000.");
+      }
       return {
         model: {
           id: config.model,
@@ -553,7 +562,10 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string,
         stream: () => {
           throw new Error("Hermes models must be invoked through the remote agent driver.");
         },
-        hermes: {baseUrl, apiKey},
+        hermes: {
+          baseUrl, apiKey,
+          ...(localToolTimeoutMs === undefined ? {} : {localToolTimeoutMs}),
+        },
       };
     }
     case "anthropic":

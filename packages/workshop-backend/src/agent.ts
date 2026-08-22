@@ -323,6 +323,10 @@ export interface AgentHooks {
   ):
       Promise<{execute: true} | {execute: false, result: HermesToolResult}>;
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
+  interruptHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
+
+  /** Keep a non-cancellable Hermes tool mutation alive after its remote turn detaches. */
+  waitUntilHermesTool(promise: Promise<unknown>): void;
 
   /** Whether a captured gatekeeper action requires approval before another model step. */
   hasCapturedActionAwaitingDecision(chatId: number): boolean;
@@ -3069,6 +3073,9 @@ export async function runAgent(
               hooks.claimHermesToolCall(chatId, turnId, callId, toolName, sessionId),
             resolveToolCall: (turnId, callId, result) =>
               hooks.resolveHermesToolCall(turnId, callId, result),
+            interruptToolCall: (turnId, callId, result) =>
+              hooks.interruptHermesToolCall(turnId, callId, result),
+            waitUntil: promise => hooks.waitUntilHermesTool(promise),
             onTurnStarted: (turnId, sessionId) =>
               hooks.recordHermesTurnStarted(chatId, turnId, sessionId),
             invalidateSession: () => hooks.invalidateHermesSession(chatId),

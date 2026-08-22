@@ -44,6 +44,22 @@ describe("Hermes durable tool claims", () => {
     await expect(duplicate).resolves.toEqual({ execute: false, result });
   });
 
+  it("durably interrupts a timed-out claim and releases its racing delivery", async () => {
+    let {rows, machine} = fixture();
+    await machine.claim(7, "session-1", "turn-1", "call-1", "writeFile");
+    let duplicate = machine.claim(7, "session-1", "turn-1", "call-1", "writeFile");
+    let result = {
+      result: "local execution timeout",
+      isError: true,
+      content: [{type: "text" as const, text: "local execution timeout"}],
+    };
+    machine.interrupt("turn-1", "call-1", result);
+    await expect(duplicate).resolves.toEqual({execute: false, result});
+    expect(rows.get(hermesToolCallKey("turn-1", "call-1"))).toMatchObject({
+      state: "interrupted", result,
+    });
+  });
+
   it("replays a tagged mutation after restart but never re-executes executeCode", async () => {
     let { rows, machine } = fixture();
     await machine.claim(7, "session-1", "turn-1", "write", "writeFile");

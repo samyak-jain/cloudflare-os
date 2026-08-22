@@ -102,6 +102,20 @@ describe("getModel AI Gateway routing", () => {
     }), config, INITIATOR).hermes?.baseUrl).toBe("http://127.0.0.1:8788");
   });
 
+  it("validates the deployment-configured Hermes local tool timeout", () => {
+    let config = {provider: "hermes" as const, model: "hermes", apiToken: ""};
+    expect(getModel(env({
+      HERMES_BASE_URL: "https://hermes.example",
+      WORKSHOP_API_KEY: "a".repeat(64),
+      HERMES_LOCAL_TOOL_TIMEOUT_MS: "120000",
+    }), config, INITIATOR).hermes?.localToolTimeoutMs).toBe(120_000);
+    expect(() => getModel(env({
+      HERMES_BASE_URL: "https://hermes.example",
+      WORKSHOP_API_KEY: "a".repeat(64),
+      HERMES_LOCAL_TOOL_TIMEOUT_MS: "forever",
+    }), config, INITIATOR)).toThrow("HERMES_LOCAL_TOOL_TIMEOUT_MS");
+  });
+
   it("routes non-Workers providers through the platform gateway", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },

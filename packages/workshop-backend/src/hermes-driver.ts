@@ -41,6 +41,9 @@ export interface HermesDriverHooks {
     sessionId: string,
   ): Promise<{ execute: true } | { execute: false; result: HermesToolResult }>;
   resolveToolCall(turnId: string, callId: string, result: HermesToolResult): void;
+  interruptToolCall(turnId: string, callId: string, result: HermesToolResult): void;
+  /** Keep non-cancellable local side effects alive after the remote turn detaches. */
+  waitUntil(promise: Promise<unknown>): void;
   onTurnStarted(turnId: string, sessionId: string): void;
   onTerminalProjected?(turnId: string, sequence: number): void;
   invalidateSession?(): void;
@@ -74,6 +77,8 @@ export interface HermesDriverOptions {
   requestTimeoutMs?: number;
   /** Maximum time an open SSE stream may produce no event. */
   sseIdleTimeoutMs?: number;
+  /** Maximum time to await one local tool before resolving its claim as interrupted. */
+  localToolTimeoutMs?: number;
   /** Deterministic test seam for retry jitter. */
   random?: () => number;
 }
@@ -352,9 +357,11 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
   let turnCapTimer: ReturnType<typeof setTimeout> | undefined;
   let hardDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let hardDeadlineController = new AbortController();
-  let runSignal = hardDeadlineController.signal;
+  let networkController = new AbortController();
+  let runSignal = networkController.signal;
   let requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   let sseIdleTimeoutMs = options.sseIdleTimeoutMs ?? 90_000;
+  let localToolTimeoutMs = options.localToolTimeoutMs ?? 5 * 60_000;
   let random = options.random ?? Math.random;
   let currentUsage = usage();
   let deltasPosted = false;
@@ -385,8 +392,9 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
     });
   };
 
-  let retryDelay = async (error: unknown) => {
-    if (hardDeadlineController.signal.aborted) {
+  let retryDelay = async (error: unknown, independent = false) => {
+    if (!independent && options.signal.aborted) throw options.signal.reason ?? error;
+    if (!independent && hardDeadlineController.signal.aborted) {
       throw new HermesTimeoutError("Hermes turn exceeded its hard local deadline.");
     }
     let classification = classifyHermesFailure(error);
@@ -406,6 +414,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
     path: string,
     body: unknown,
     signal = runSignal,
+    independent = false,
   ) => {
     while (true) {
       try {
@@ -413,7 +422,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
         retryAttempt = 0;
         return;
       } catch (error) {
-        await retryDelay(error);
+        await retryDelay(error, independent);
       }
     }
   };
@@ -459,18 +468,22 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
       signal,
       mode: signal === "abort" ? "immediate" : "after_current_call",
       reason,
-    }, new AbortController().signal);
+    }, new AbortController().signal, true);
     await controlPromise;
   };
 
   let abortListener = () => {
     void sendControl("abort", "user_cancelled").catch(() => {});
+    networkController.abort(options.signal.reason);
   };
   options.signal.addEventListener("abort", abortListener, { once: true });
+  if (options.signal.aborted) abortListener();
   hardDeadlineTimer = setTimeout(
-    () => hardDeadlineController.abort(
-      new HermesTimeoutError("Hermes turn exceeded its hard local deadline."),
-    ),
+    () => {
+      let error = new HermesTimeoutError("Hermes turn exceeded its hard local deadline.");
+      hardDeadlineController.abort(error);
+      networkController.abort(error);
+    },
     (options.turnTimeoutMs ?? 15 * 60_000) + (options.hardDeadlineGraceMs ?? 60_000),
   );
 
@@ -653,9 +666,22 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               });
 
               if (!sessionId) throw new HermesProtocolError("Hermes tool call has no session id.");
-              let claim = await options.hooks.claimToolCall(
-                turnId, callId, call.name, sessionId,
+              if (!turnId) throw new HermesProtocolError("Hermes tool call has no turn id.");
+              let toolTurnId = turnId;
+              let claimPromise = options.hooks.claimToolCall(
+                toolTurnId, callId, call.name, sessionId,
               );
+              let claimAbort = Promise.withResolvers<"aborted">();
+              let claimAbortListener = () => claimAbort.resolve("aborted");
+              options.signal.addEventListener("abort", claimAbortListener, { once: true });
+              if (options.signal.aborted) claimAbortListener();
+              let claimed = await Promise.race([
+                claimPromise.then(claim => ({kind: "claim" as const, claim})),
+                claimAbort.promise.then(() => ({kind: "aborted" as const})),
+              ]);
+              options.signal.removeEventListener("abort", claimAbortListener);
+              if (claimed.kind === "aborted") return;
+              let claim = claimed.claim;
               let stored: HermesToolResult;
               if (claim.execute) {
                 let tool = toolsByName.get(call.name);
@@ -665,40 +691,72 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                   toolName: call.name,
                   args: block.arguments,
                 });
-                try {
-                  if (!tool) throw new Error(`Tool ${call.name} not found`);
-                  let prepared = tool.prepareArguments?.(block.arguments) ?? block.arguments;
-                  let args = validateToolArguments(tool, { ...block, arguments: prepared });
-                  let hermesTool = tool as AgentTool & {
-                    executeHermes?: (
-                      ...args: [...Parameters<AgentTool["execute"]>, string]
-                    ) => ReturnType<AgentTool["execute"]>;
-                  };
-                  let operationId = `hermes:${turnId}:${callId}`;
-                  let result = hermesTool.executeHermes
-                    ? await hermesTool.executeHermes(
-                        callId,
-                        args,
-                        options.signal,
-                        undefined,
-                        operationId,
-                      )
-                    : await tool.execute(callId, args, options.signal);
-                  stored = {
-                    result: resultText(result.content),
-                    isError: false,
-                    content: result.content,
-                    details: result.details,
-                  };
-                } catch (error) {
-                  let message = errorText(error);
+                let execution = (async (): Promise<HermesToolResult> => {
+                  try {
+                    if (!tool) throw new Error(`Tool ${call.name} not found`);
+                    let prepared = tool.prepareArguments?.(block.arguments) ?? block.arguments;
+                    let args = validateToolArguments(tool, { ...block, arguments: prepared });
+                    let hermesTool = tool as AgentTool & {
+                      executeHermes?: (
+                        ...args: [...Parameters<AgentTool["execute"]>, string]
+                      ) => ReturnType<AgentTool["execute"]>;
+                    };
+                    let operationId = `hermes:${toolTurnId}:${callId}`;
+                    // Local mutations cannot be safely cancelled. Remote deadline/user abort only
+                    // detach the caller; this signal intentionally remains live until the tool ends.
+                    let localSignal = new AbortController().signal;
+                    let result = hermesTool.executeHermes
+                      ? await hermesTool.executeHermes(
+                          callId, args, localSignal, undefined, operationId,
+                        )
+                      : await tool.execute(callId, args, localSignal);
+                    return {
+                      result: resultText(result.content),
+                      isError: false,
+                      content: result.content,
+                      details: result.details,
+                    };
+                  } catch (error) {
+                    let message = errorText(error);
+                    return {
+                      result: message,
+                      isError: true,
+                      content: [{ type: "text", text: message }],
+                    };
+                  }
+                })();
+                let timeout = Promise.withResolvers<"timeout">();
+                let timeoutTimer = setTimeout(() => timeout.resolve("timeout"), localToolTimeoutMs);
+                let toolAbort = Promise.withResolvers<"aborted">();
+                let toolAbortListener = () => toolAbort.resolve("aborted");
+                options.signal.addEventListener("abort", toolAbortListener, { once: true });
+                if (options.signal.aborted) toolAbortListener();
+                let outcome = await Promise.race([
+                  execution.then(result => ({kind: "result" as const, result})),
+                  timeout.promise.then(() => ({kind: "timeout" as const})),
+                  toolAbort.promise.then(() => ({kind: "aborted" as const})),
+                ]);
+                clearTimeout(timeoutTimer);
+                options.signal.removeEventListener("abort", toolAbortListener);
+                if (outcome.kind === "aborted") {
+                  options.hooks.waitUntil(execution.then(result => {
+                    options.hooks.resolveToolCall(toolTurnId, callId, result);
+                  }));
+                  return;
+                }
+                if (outcome.kind === "timeout") {
+                  let message = "local execution timeout";
                   stored = {
                     result: message,
                     isError: true,
-                    content: [{ type: "text", text: message }],
+                    content: [{type: "text", text: message}],
                   };
+                  options.hooks.interruptToolCall(toolTurnId, callId, stored);
+                  options.hooks.waitUntil(execution.then(() => {}));
+                } else {
+                  stored = outcome.result;
+                  options.hooks.resolveToolCall(toolTurnId, callId, stored);
                 }
-                options.hooks.resolveToolCall(turnId, callId, stored);
                 await options.hooks.emit({
                   type: "tool_execution_end",
                   toolCallId: callId,
@@ -717,6 +775,11 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 });
               }
 
+              if (options.signal.aborted) return;
+              if (hardDeadlineController.signal.aborted) {
+                throw new HermesTimeoutError("Hermes turn exceeded its hard local deadline.");
+              }
+
               toolResults.set(callId, {
                 role: "toolResult",
                 toolCallId: callId,
@@ -727,7 +790,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 timestamp: Date.now(),
               });
               await retryPostJson(
-                `/api/workshop/v1/turns/${encodeURIComponent(turnId)}/tool-results/` +
+                `/api/workshop/v1/turns/${encodeURIComponent(toolTurnId)}/tool-results/` +
                   encodeURIComponent(callId),
                 {
                   protocol_version: PROTOCOL_VERSION,
@@ -805,6 +868,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
         }
         retryAttempt = 0;
       } catch (error) {
+        if (options.signal.aborted) return;
         await retryDelay(error);
         continue;
       }

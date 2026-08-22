@@ -107,6 +107,10 @@ function harness(server: FakeHermesServer, overrides: Partial<HermesDriverHooks>
     resolveToolCall: (turnId, callId, result) => {
       stored.set(`${turnId}.${callId}`, result);
     },
+    interruptToolCall: (turnId, callId, result) => {
+      stored.set(`${turnId}.${callId}`, result);
+    },
+    waitUntil: () => {},
     onTurnStarted: (_turnId, sessionId) => {
       sessions.push(sessionId);
     },
@@ -645,6 +649,111 @@ describe("Hermes remote driver", () => {
       sseIdleTimeoutMs: 1_000,
       requestTimeoutMs: 20,
     })).rejects.toThrow("hard local deadline");
+  });
+
+  it("interrupts a timed-out local tool, posts is_error, and continues the turn", async () => {
+    let server = new FakeHermesServer(
+      [
+        {seq: 1, event: "turn.started"},
+        {seq: 2, event: "message.start"},
+        {seq: 3, event: "tool_call.start", call_id: "call-timeout", name: "readFile"},
+        {seq: 4, event: "tool_call.end", call_id: "call-timeout", arguments: {filename: "a"}},
+      ],
+      [{seq: 5, event: "turn.end", status: "completed", stop_reason: "stop"}],
+    );
+    let detached: Promise<unknown>[] = [];
+    let run = harness(server, {waitUntil: promise => detached.push(promise)});
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "tool-timeout",
+      inputText: "read",
+      tools: [tool(() => new Promise(() => {}))],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+      localToolTimeoutMs: 5,
+    });
+    expect(server.toolResults).toEqual([{
+      protocol_version: 1,
+      result: "local execution timeout",
+      is_error: true,
+    }]);
+    expect(run.stored.get("turn-1.call-timeout")).toMatchObject({
+      result: "local execution timeout", isError: true,
+    });
+    expect(detached).toHaveLength(1);
+  });
+
+  it("detaches an in-flight local tool on user abort and persists its eventual result", async () => {
+    let server = new FakeHermesServer([
+      {seq: 1, event: "turn.started"},
+      {seq: 2, event: "message.start"},
+      {seq: 3, event: "tool_call.start", call_id: "call-abort", name: "readFile"},
+      {seq: 4, event: "tool_call.end", call_id: "call-abort", arguments: {filename: "a"}},
+    ]);
+    let controller = new AbortController();
+    let finish = Promise.withResolvers<{content: [{type: "text"; text: string}]}>();
+    let detached: Promise<unknown>[] = [];
+    let run = harness(server, {waitUntil: promise => detached.push(promise)});
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "tool-abort",
+      inputText: "read",
+      tools: [tool(async () => {
+        controller.abort();
+        return finish.promise;
+      })],
+      signal: controller.signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+      localToolTimeoutMs: 1_000,
+    });
+    expect(server.toolResults).toEqual([]);
+    expect(detached).toHaveLength(1);
+    finish.resolve({content: [{type: "text", text: "finished once"}]});
+    await detached[0];
+    expect(run.stored.get("turn-1.call-abort")).toMatchObject({
+      result: "finished once", isError: false,
+    });
+  });
+
+  it("cancels a silent SSE immediately when the user aborts", async () => {
+    let encoder = new TextEncoder();
+    let controller = new AbortController();
+    let run = harness(new FakeHermesServer([]), {
+      onTurnStarted: () => controller.abort(),
+    });
+    let fetcher: typeof fetch = async (input, init) => {
+      let request = new Request(input, init);
+      if (new URL(request.url).pathname.endsWith("/control")) return Response.json({ok: true});
+      return new Response(new ReadableStream({
+        start(stream) {
+          stream.enqueue(encoder.encode(`data: ${JSON.stringify({
+            protocol_version: 1, turn_id: "turn-abort", session_id: "session-1",
+            seq: 1, event: "turn.started", timestamp: 1,
+          })}\n\n`));
+        },
+      }));
+    };
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "silent-abort",
+      inputText: "stop",
+      tools: [],
+      signal: controller.signal,
+      hooks: run.hooks,
+      fetch: fetcher,
+      sseIdleTimeoutMs: 60_000,
+    });
   });
 
   it("maps user cancellation to immediate abort control", async () => {

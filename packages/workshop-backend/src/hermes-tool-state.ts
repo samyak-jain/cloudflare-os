@@ -89,4 +89,16 @@ export class HermesToolCallStateMachine {
     this.#active.delete(key);
     active?.resolve(result);
   }
+
+  /** Resolve a timed-out claim as interrupted and release any racing delivery. */
+  interrupt(turnId: string, callId: string, result: HermesToolResult): void {
+    let key = hermesToolCallKey(turnId, callId);
+    let previous = this.records.get(key);
+    if (!previous) throw new Error("Hermes tool call was interrupted without a durable claim.");
+    if (previous.state === "resolved" || previous.state === "interrupted") return;
+    this.records.put({ ...previous, state: "interrupted", result });
+    let active = this.#active.get(key);
+    this.#active.delete(key);
+    active?.resolve(result);
+  }
 }

@@ -30,6 +30,7 @@ declare global {
       WORKSHOP_API_KEY?: string;
       WORKSHOP_WAKE_TOKEN?: string;
       HERMES_ALLOW_INSECURE_LOOPBACK?: string;
+      HERMES_LOCAL_TOOL_TIMEOUT_MS?: string;
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
