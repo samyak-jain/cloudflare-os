@@ -1,17 +1,18 @@
 # Generative UI
 
 Ephemeral interfaces in the chat: Lena answers with a form, a table, or a picker instead of prose.
-She writes JSX against a whitelisted catalog, the DO evaluates it in a sandboxed isolate, and only
-a validated `{type, props, children}` JSON tree reaches the client. See
-`docs/cloudflare-os-integration.md` § "Generative UI" in the design repo.
+She writes JSX against a whitelisted catalog. The backend parses it as data with a real JSX parser,
+interprets only catalog elements and literals, and sends only a validated
+`{type, props, children}` JSON tree to the client. See `docs/cloudflare-os-integration.md` §
+"Generative UI" in the design repo.
 
-**Nothing executable crosses the wire.** No handlers, no closures, no component code — a prop is a
-literal, a `{"$bind": "path"}` marker, or JSON built from those. This module renders that tree
-against components *it* owns. The backend's parent realm is the authoritative security boundary:
-it independently re-validates and normalizes the isolate's returned component names, prop schemas,
-bindings, JSON shape, node budget, and byte budget before persistence. Validation inside the model's
-isolate exists only to produce faster, friendlier tool errors. The client validates again so old or
-future durable rows degrade safely, but does not substitute for the parent check.
+**Nothing executable crosses the wire.** No handlers, closures, or component code — a prop is a
+literal, a `{"$bind": "path"}` marker, or JSON built from those. Model-authored JavaScript is
+never executed: imports, calls other than `bind("path")`, functions, operators, spreads,
+conditionals, loops, and template literals do not belong to the accepted AST grammar. After
+interpretation, the backend independently re-validates and reconstructs component names, prop
+schemas, bindings, JSON shape, node budget, and byte budget before persistence. The client
+validates again so old or future durable rows degrade safely, but does not replace backend checks.
 
 ## Layers
 
@@ -65,11 +66,11 @@ There is no third thing, and no way for a model to author one.
 
 ## Freezing
 
-`liveCard.ts` decides. An interface is live if it is the newest one in the chat *and* nothing has
-been said since — which needs no extra state on either side, because submitting produces a turn,
-and a turn appends messages after the card. Reload mid-form and the card is still live; reload
-after submitting and it isn't; scroll up and every past interface is read-only with the values it
-carried.
+`liveCard.ts` decides. An interface is live if it is the newest one in the chat and no submission
+or later conversation event has followed it. Submission appends a structured
+`generativeUiAction` event and sets `consumed` on the durable tool result, so either signal
+freezes the card after reload even if the resumed agent turn contains no prose. Reload mid-form
+and the card is still live; scroll up and every past interface is read-only with its saved values.
 
 A frozen card dims slightly, disables its controls, and says why in a single footer line. It stays
 legible: a submitted form the user can't read back is worse than one they can't edit.

@@ -72,9 +72,9 @@ import {
   readCustomExportFormats,
 } from "./gadget-export";
 import {
-  executeRenderUI,
   hasRenderUIButtonAction,
   listRenderUIBindPaths,
+  parseRenderUIJsx,
   renderUIStateValue,
   setRenderUIStateValue,
   validateRenderUIBindValue,
@@ -7594,7 +7594,7 @@ class OverseerImpl implements AgentHooks {
       chatId: number, jsx: string,
       stateDefaults: Record<string, unknown>): Promise<GenerativeUiResult> {
     if (!this.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
-    let result = await executeRenderUI(this.env.LOADER, jsx, stateDefaults);
+    let result = await parseRenderUIJsx(jsx, stateDefaults);
     if (!this.storage.chatMeta.get(chatId)) {
       throw new Error("The chat was deleted while renderUI was executing.");
     }

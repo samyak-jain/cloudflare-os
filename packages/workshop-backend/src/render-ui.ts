@@ -1,9 +1,6 @@
-// renderUI deliberately vendors a tiny JSX transform and runtime instead of depending on
-// jsx2ui. The transform only rewrites JSX syntax; the resulting JavaScript executes in a fresh
-// Dynamic Worker. The runtime is shipped into that worker as source, builds plain nodes, applies
-// strict catalog schemas, and checks the serialized result size before it crosses the isolate
-// boundary. This keeps the dependency and trust surface small while preserving ordinary
-// JavaScript expressions inside JSX.
+// renderUI parses JSX as data in the trusted Worker. Model-authored source is never evaluated or
+// loaded as JavaScript: a deliberately tiny AST interpreter accepts only catalog elements,
+// literals, and bind("path"), then the independent tree validator reconstructs the durable JSON.
 
 import {
   GENERATIVE_UI_CATALOG_VERSION,
@@ -12,7 +9,8 @@ import {
   type GenerativeUiNode,
   type GenerativeUiResult,
 } from "@gadgets/workshop-shared/api";
-import type {WorkerEntrypoint} from "cloudflare:workers";
+import {Parser, type Node} from "acorn";
+import jsx from "acorn-jsx";
 
 /** Version of the backend/frontend renderUI component catalog and validation contract. */
 export const RENDER_UI_CATALOG_VERSION = GENERATIVE_UI_CATALOG_VERSION;
@@ -24,10 +22,9 @@ export const MAX_RENDER_UI_SOURCE_BYTES = 64 * 1024;
 export const MAX_RENDER_UI_TREE_BYTES = 256 * 1024;
 
 const MAX_RENDER_UI_STATE_BYTES = 64 * 1024;
-const MAX_RENDER_UI_RESULT_BYTES = MAX_RENDER_UI_TREE_BYTES + MAX_RENDER_UI_STATE_BYTES + 4_096;
 const MAX_RENDER_UI_DEPTH = 64;
 const MAX_RENDER_UI_NODES = 5_000;
-const RENDER_UI_CPU_MS = 1_000;
+const MAX_RENDER_UI_AST_NODES = 20_000;
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 type JsonValue = null | boolean | number | string | JsonValue[] | {[key: string]: JsonValue};
@@ -100,8 +97,7 @@ const keyValueItems: ArraySchema = {
 };
 
 /**
- * Strict backend validation catalog. It is data (rather than executable validators) so the same
- * schema can be embedded byte-for-byte in each fresh Dynamic Worker isolate.
+ * Strict backend validation catalog shared by the JSX interpreter and authoritative tree pass.
  */
 export const RENDER_UI_CATALOG: Record<string, ComponentSchema> = {
   Stack: {children: true, props: {gap: optional(spacing)}},
@@ -225,555 +221,277 @@ function sourceByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+const JsxParser = Parser.extend(jsx({
+  allowNamespaces: false,
+  allowNamespacedObjects: false,
+}));
+
+type AstNode = Node & Record<string, unknown>;
+type AstBudget = {count: number};
+
 function syntaxError(source: string, offset: number, message: string): Error {
   let line = source.slice(0, offset).split("\n").length;
   let column = offset - source.lastIndexOf("\n", offset - 1);
-  return new Error(`Invalid renderUI JSX at ${line}:${column}: ${message}`);
+  return new Error("Invalid renderUI JSX at " + line + ":" + column + ": " + message);
 }
 
-function decodeEntities(value: string): string {
-  return value.replaceAll("&lt;", "<").replaceAll("&gt;", ">")
-      .replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&amp;", "&");
+function isAstNode(value: unknown): value is AstNode {
+  return value !== null && typeof value === "object" &&
+      typeof (value as {type?: unknown}).type === "string" &&
+      typeof (value as {start?: unknown}).start === "number";
 }
 
-function scanQuoted(source: string, start: number, quote: string): number {
-  let i = start + 1;
-  while (i < source.length) {
-    if (source[i] === "\\") {
-      i += 2;
-    } else if (source[i] === quote) {
-      return i + 1;
-    } else {
-      i++;
-    }
+function astNode(source: string, value: unknown, parent: AstNode, field: string): AstNode {
+  if (!isAstNode(value)) {
+    throw syntaxError(source, parent.start, parent.type + "." + field + " is malformed.");
   }
-  throw syntaxError(source, start, "unterminated string literal");
+  return value;
 }
 
-function scanComment(source: string, start: number): number {
-  if (source[start + 1] === "/") {
-    let end = source.indexOf("\n", start + 2);
-    return end < 0 ? source.length : end;
+function astNodes(source: string, value: unknown, parent: AstNode, field: string): AstNode[] {
+  if (!Array.isArray(value) || !value.every(isAstNode)) {
+    throw syntaxError(source, parent.start, parent.type + "." + field + " is malformed.");
   }
-  if (source[start + 1] === "*") {
-    let end = source.indexOf("*/", start + 2);
-    if (end < 0) throw syntaxError(source, start, "unterminated comment");
-    return end + 2;
-  }
-  return start;
+  return value;
 }
 
-function maskLiteralsAndComments(source: string): string {
-  // Every scanner in this file returns UTF-16 code-unit offsets. split("") deliberately uses
-  // that same unit; spreading the string uses Unicode code points and lets astral characters
-  // shift the mask past the literal they belong to.
-  let chars = source.split("");
-  let i = 0;
-  while (i < source.length) {
-    let c = source[i];
-    let end = i;
-    if (c === '"' || c === "'" || c === "`") {
-      end = scanQuoted(source, i, c);
-    } else if (c === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
-      end = scanComment(source, i);
-    }
-    if (end > i) {
-      for (let offset = i; offset < end; offset++) {
-        if (chars[offset] !== "\n") chars[offset] = " ";
-      }
-      i = end;
-    } else {
-      i++;
-    }
+function enterAst(source: string, node: AstNode, depth: number, budget: AstBudget): void {
+  if (depth > MAX_RENDER_UI_DEPTH) {
+    throw syntaxError(source, node.start, "literal/element nesting exceeds the maximum depth.");
   }
-  return chars.join("");
-}
-
-function transformJavaScript(source: string): string {
-  let out = "";
-  let i = 0;
-  while (i < source.length) {
-    let c = source[i];
-    if (c === '"' || c === "'" || c === "`") {
-      let end = scanQuoted(source, i, c);
-      out += source.slice(i, end);
-      i = end;
-      continue;
-    }
-    if (c === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
-      let end = scanComment(source, i);
-      out += source.slice(i, end);
-      i = end;
-      continue;
-    }
-    if (c === "<" && (source[i + 1] === ">" || /[A-Za-z]/.test(source[i + 1] ?? ""))) {
-      let parsed = parseElement(source, i);
-      out += parsed.code;
-      i = parsed.end;
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
-
-function readBraced(source: string, start: number): {expression: string; end: number} {
-  let depth = 1;
-  let i = start + 1;
-  while (i < source.length) {
-    let c = source[i];
-    if (c === '"' || c === "'" || c === "`") {
-      i = scanQuoted(source, i, c);
-      continue;
-    }
-    if (c === "/" && (source[i + 1] === "/" || source[i + 1] === "*")) {
-      i = scanComment(source, i);
-      continue;
-    }
-    if (c === "{") depth++;
-    if (c === "}" && --depth === 0) {
-      return {expression: source.slice(start + 1, i), end: i + 1};
-    }
-    i++;
-  }
-  throw syntaxError(source, start, "unterminated JSX expression");
-}
-
-function parseName(source: string, start: number, kind: string): {name: string; end: number} {
-  let match = /^[A-Za-z][A-Za-z0-9_-]*/.exec(source.slice(start));
-  if (!match) throw syntaxError(source, start, `expected ${kind} name`);
-  return {name: match[0], end: start + match[0].length};
-}
-
-function skipSpace(source: string, start: number): number {
-  let i = start;
-  while (/\s/.test(source[i] ?? "")) i++;
-  return i;
-}
-
-function parseElement(source: string, start: number): {code: string; end: number} {
-  let i = start + 1;
-  let fragment = source[i] === ">";
-  let tag = "Fragment";
-  if (fragment) {
-    i++;
-  } else {
-    let parsed = parseName(source, i, "component");
-    tag = parsed.name;
-    i = parsed.end;
-  }
-
-  let props: string[] = [];
-  let propNames = new Set<string>();
-  let selfClosing = false;
-  if (!fragment) {
-    while (true) {
-      i = skipSpace(source, i);
-      if (source.startsWith("/>", i)) {
-        selfClosing = true;
-        i += 2;
-        break;
-      }
-      if (source[i] === ">") {
-        i++;
-        break;
-      }
-      if (source.startsWith("{...", i)) {
-        throw syntaxError(source, i, "spread props are not allowed; list each catalog prop");
-      }
-      let parsed = parseName(source, i, "prop");
-      let name = parsed.name;
-      if (propNames.has(name)) throw syntaxError(source, i, `duplicate prop ${name}`);
-      propNames.add(name);
-      i = skipSpace(source, parsed.end);
-      let value = "true";
-      if (source[i] === "=") {
-        i = skipSpace(source, i + 1);
-        if (source[i] === '"' || source[i] === "'") {
-          let quote = source[i];
-          let end = scanQuoted(source, i, quote);
-          value = JSON.stringify(decodeEntities(source.slice(i + 1, end - 1)));
-          i = end;
-        } else if (source[i] === "{") {
-          let braced = readBraced(source, i);
-          if (!braced.expression.trim()) {
-            throw syntaxError(source, i, `prop ${name} has an empty expression`);
-          }
-          value = `(${transformJavaScript(braced.expression)})`;
-          i = braced.end;
-        } else {
-          throw syntaxError(source, i, `prop ${name} must use a quoted or braced value`);
-        }
-      }
-      props.push(`${JSON.stringify(name)}:${value}`);
-    }
-  }
-
-  let children: string[] = [];
-  if (!selfClosing) {
-    while (true) {
-      if (i >= source.length) {
-        throw syntaxError(source, start, `missing closing tag for ${fragment ? "fragment" : tag}`);
-      }
-      if (source.startsWith("</", i)) {
-        i += 2;
-        if (fragment) {
-          if (source[i] !== ">") throw syntaxError(source, i, "expected </> for fragment");
-          i++;
-        } else {
-          let closing = parseName(source, i, "closing component");
-          if (closing.name !== tag) {
-            throw syntaxError(source, i, `expected </${tag}>, received </${closing.name}>`);
-          }
-          i = skipSpace(source, closing.end);
-          if (source[i] !== ">") throw syntaxError(source, i, `expected > after </${tag}`);
-          i++;
-        }
-        break;
-      }
-      if (source[i] === "<") {
-        let child = parseElement(source, i);
-        children.push(child.code);
-        i = child.end;
-        continue;
-      }
-      if (source[i] === "{") {
-        let braced = readBraced(source, i);
-        let expression = braced.expression.trim();
-        if (expression && !expression.startsWith("/*")) {
-          children.push(`(${transformJavaScript(braced.expression)})`);
-        }
-        i = braced.end;
-        continue;
-      }
-      let end = i;
-      while (end < source.length && source[end] !== "<" && source[end] !== "{") end++;
-      let text = decodeEntities(source.slice(i, end)).replace(/\s+/g, " ");
-      if (text.trim()) children.push(JSON.stringify(text));
-      i = end;
-    }
-  }
-
-  let type = fragment ? "Fragment" : JSON.stringify(tag);
-  let args = [type, `{${props.join(",")}}`, ...children];
-  return {code: `jsx(${args.join(",")})`, end: i};
-}
-
-/**
- * Transform a JavaScript expression containing JSX into calls to the vendored plain-node JSX
- * runtime. Imports, require(), spread props, and malformed JSX are rejected before execution.
- */
-export function transformRenderUIJsx(source: string): string {
-  let bytes = sourceByteLength(source);
-  if (bytes > MAX_RENDER_UI_SOURCE_BYTES) {
-    throw new Error(`renderUI JSX exceeds the ${MAX_RENDER_UI_SOURCE_BYTES}-byte source limit.`);
-  }
-  if (!source.trim()) throw new Error("renderUI JSX cannot be empty.");
-  let withoutTrailingSemicolon = source.trim().replace(/;\s*$/, "");
-  // Transform first so JSX text children become quoted JavaScript strings. Security guards then
-  // inspect only executable positions: prose such as "import data" is inert, while import() in a
-  // JSX expression remains visible.
-  let transformed = transformJavaScript(withoutTrailingSemicolon);
-  let codeOnly = maskLiteralsAndComments(transformed);
-  if (/\bimport(?:\s|\(|\.)/.test(codeOnly)) {
-    throw new Error("renderUI JSX cannot import modules. Allowed globals: jsx catalog and bind().");
-  }
-  if (/\brequire\s*\(/.test(codeOnly)) {
-    throw new Error("renderUI JSX cannot call require(). Allowed globals: jsx catalog and bind().");
-  }
-  if (/\bwhile\s*\(\s*true\s*\)|\bfor\s*\(\s*;\s*;\s*\)/.test(codeOnly)) {
-    throw new Error(
-        `renderUI JSX contains an unconditional loop that would exceed the ` +
-        `${RENDER_UI_CPU_MS}ms isolate CPU limit.`);
-  }
-  return transformed;
-}
-
-const RUNTIME_SOURCE = `
-const CATALOG = ${JSON.stringify(RENDER_UI_CATALOG)};
-const CATALOG_VERSION = ${RENDER_UI_CATALOG_VERSION};
-const MAX_TREE_BYTES = ${MAX_RENDER_UI_TREE_BYTES};
-const MAX_STATE_BYTES = ${MAX_RENDER_UI_STATE_BYTES};
-const MAX_DEPTH = 64;
-const MAX_NODES = 5000;
-const BLOCKED_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-export const Fragment = Symbol("Fragment");
-
-export function bind(statePath) {
-  return {$bind: statePath};
-}
-
-export function jsx(type, props, ...children) {
-  if (type === Fragment) return children;
-  return {type, props: props ?? {}, children};
-}
-
-function plainObject(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  let prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function assertJson(value, path, depth = 0) {
-  if (depth > MAX_DEPTH) throw new Error(path + " exceeds the maximum nesting depth.");
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(path + " must contain only finite numbers.");
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) assertJson(value[i], path + "[" + i + "]", depth + 1);
-    return;
-  }
-  if (!plainObject(value)) throw new Error(path + " must contain only JSON values.");
-  for (let [key, child] of Object.entries(value)) {
-    if (BLOCKED_KEYS.has(key)) throw new Error(path + " contains forbidden key " + key + ".");
-    assertJson(child, path + "." + key, depth + 1);
+  if (++budget.count > MAX_RENDER_UI_AST_NODES) {
+    throw syntaxError(source, node.start,
+        "JSX exceeds the " + MAX_RENDER_UI_AST_NODES + "-node syntax budget.");
   }
 }
 
-function statePaths(state) {
-  if (!plainObject(state)) throw new Error("renderUI state must be a JSON object.");
-  assertJson(state, "state");
-  let encoded = JSON.stringify(state);
-  if (new TextEncoder().encode(encoded).byteLength > MAX_STATE_BYTES) {
-    throw new Error("renderUI state exceeds the " + MAX_STATE_BYTES + "-byte limit.");
-  }
-  let paths = new Map();
-  function visit(value, path) {
-    if (Array.isArray(value)) {
-      for (let index = 0; index < value.length; index++) {
-        visit(value[index], path ? path + "." + index : String(index));
-      }
-    } else if (plainObject(value)) {
-      for (let [key, child] of Object.entries(value)) {
-        if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) || BLOCKED_KEYS.has(key)) {
-          throw new Error("Invalid renderUI state key " + JSON.stringify(key) + ".");
-        }
-        visit(child, path ? path + "." + key : key);
-      }
-    } else {
-      paths.set(path, value);
-    }
-  }
-  visit(state, "");
-  return paths;
+function rejectAst(source: string, node: AstNode, context: string): never {
+  throw syntaxError(source, node.start, node.type + " is not allowed in " + context +
+      ". Allowed syntax is catalog JSX, JSON literals, and bind(\"path\").");
 }
 
-function schemaName(schema) {
-  if (schema.type === "string" && schema.enum) {
-    return schema.enum.map(value => JSON.stringify(value)).join(" | ");
-  }
-  if (schema.type === "union") return schema.variants.map(schemaName).join(" or ");
-  if (schema.type === "array") return "array";
-  if (schema.type === "object" || schema.type === "record") return "object";
-  if (schema.type === "scalar") return "string, number, boolean, or null";
-  return schema.type;
+function literalValue(source: string, node: AstNode): JsonValue {
+  if (node.type !== "Literal") rejectAst(source, node, "a literal value");
+  let value = node.value;
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return rejectAst(source, node, "a JSON literal");
 }
 
-function validateValue(value, schema, path) {
-  switch (schema.type) {
-    case "string": {
-      if (typeof value !== "string") throw new Error(path + " must be a string.");
-      if (schema.minLength !== undefined && value.length < schema.minLength) {
-        throw new Error(path + " must not be empty.");
-      }
-      if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-        throw new Error(path + " exceeds its " + schema.maxLength + "-character limit.");
-      }
-      if (schema.enum) {
-        let matched = schema.caseInsensitive
-          ? schema.enum.find(candidate => candidate.toLowerCase() === value.toLowerCase())
-          : schema.enum.find(candidate => candidate === value);
-        if (matched === undefined) {
-          throw new Error(path + " must be one of: " + schemaName(schema) + ".");
-        }
-        value = matched;
-      }
-      return value;
-    }
-    case "number": {
-      if (schema.coerce && typeof value === "string" && value.trim() !== "") {
-        value = Number(value);
-      }
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        throw new Error(path + " must be a finite number or numeric string.");
-      }
-      if (schema.min !== undefined && value < schema.min) {
-        throw new Error(path + " must be at least " + schema.min + ".");
-      }
-      if (schema.max !== undefined && value > schema.max) {
-        throw new Error(path + " must be at most " + schema.max + ".");
-      }
-      return value;
-    }
-    case "boolean":
-      if (typeof value !== "boolean") throw new Error(path + " must be a boolean.");
-      return value;
-    case "scalar":
-      if (value !== null && !["string", "number", "boolean"].includes(typeof value)) {
-        throw new Error(path + " must be a string, number, boolean, or null.");
-      }
-      if (typeof value === "number" && !Number.isFinite(value)) {
-        throw new Error(path + " must be finite.");
-      }
-      return value;
-    case "union": {
-      let errors = [];
-      for (let variant of schema.variants) {
-        try {
-          return validateValue(value, variant, path);
-        } catch (error) {
-          errors.push(error instanceof Error ? error.message : String(error));
-        }
-      }
-      throw new Error(path + " must match " + schemaName(schema) + ". " + errors.join(" "));
-    }
-    case "array":
-      if (!Array.isArray(value)) throw new Error(path + " must be an array.");
-      if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-        throw new Error(path + " may contain at most " + schema.maxLength + " items.");
-      }
-      return value.map((item, index) => validateValue(item, schema.items, path + "[" + index + "]"));
-    case "object": {
-      if (!plainObject(value)) throw new Error(path + " must be an object.");
-      let allowed = Object.keys(schema.fields);
-      for (let key of Object.keys(value)) {
-        if (!schema.fields[key]) {
-          throw new Error(path + " has unknown field " + JSON.stringify(key) +
-            ". Allowed fields: " + allowed.join(", ") + ".");
-        }
-      }
-      let result = {};
-      for (let [key, field] of Object.entries(schema.fields)) {
-        if (value[key] === undefined) {
-          if (!field.optional) throw new Error(path + "." + key + " is required.");
-        } else {
-          result[key] = validateValue(value[key], field.schema, path + "." + key);
-        }
-      }
-      return result;
-    }
-    case "record": {
-      if (!plainObject(value)) throw new Error(path + " must be an object.");
-      let result = {};
-      for (let [key, child] of Object.entries(value)) {
-        if (BLOCKED_KEYS.has(key)) throw new Error(path + " contains forbidden key " + key + ".");
-        result[key] = validateValue(child, schema.values, path + "." + key);
-      }
-      return result;
-    }
+function objectKey(source: string, node: AstNode): string {
+  if (node.type === "Identifier" && typeof node.name === "string") return node.name;
+  if (node.type === "Literal") {
+    let value = literalValue(source, node);
+    if (typeof value === "string" || typeof value === "number") return String(value);
   }
+  return rejectAst(source, node, "an object key");
 }
 
-function isBind(value) {
-  return plainObject(value) && Object.keys(value).length === 1 && typeof value.$bind === "string";
-}
+function interpretValue(
+    source: string, node: AstNode, depth: number, budget: AstBudget,
+    allowBind: boolean): JsonValue | GenerativeUiBinding {
+  enterAst(source, node, depth, budget);
+  if (node.type === "Literal") return literalValue(source, node);
 
-function flattenChildren(values, out, path, depth, counter, paths) {
-  for (let value of values) {
-    if (value === null || value === undefined || typeof value === "boolean") continue;
-    if (Array.isArray(value)) {
-      flattenChildren(value, out, path, depth, counter, paths);
-    } else if (typeof value === "string" || typeof value === "number") {
-      out.push(String(value));
-    } else {
-      out.push(validateNode(value, path + ".children[" + out.length + "]", depth, counter, paths));
-    }
-  }
-}
-
-function validateNode(raw, path, depth, counter, paths) {
-  if (depth > MAX_DEPTH) throw new Error(path + " exceeds the maximum tree depth.");
-  if (++counter.count > MAX_NODES) throw new Error("renderUI tree exceeds the " + MAX_NODES + "-node limit.");
-  if (!plainObject(raw) || typeof raw.type !== "string" || !plainObject(raw.props) ||
-      !Array.isArray(raw.children)) {
-    throw new Error(path + " is not a JSX component node.");
-  }
-  let component = CATALOG[raw.type];
-  let allowedComponents = Object.keys(CATALOG).join(", ");
-  if (!component) {
-    throw new Error("Unknown renderUI component " + JSON.stringify(raw.type) +
-      ". Allowed components: " + allowedComponents + ".");
-  }
-  let allowedProps = Object.keys(component.props);
-  for (let name of Object.keys(raw.props)) {
-    if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML") {
-      throw new Error(path + " attempts to smuggle handler prop " + JSON.stringify(name) +
-        ". Event handlers and dangerouslySetInnerHTML are never allowed.");
-    }
-    if (!component.props[name]) {
-      throw new Error(raw.type + " has unknown prop " + JSON.stringify(name) +
-        ". Allowed props: " + (allowedProps.join(", ") || "(none)") + ".");
-    }
-  }
-  let props = {};
-  for (let [name, prop] of Object.entries(component.props)) {
-    let value = raw.props[name];
-    if (value === undefined) {
-      if (!prop.optional) throw new Error(raw.type + "." + name + " is required.");
-      continue;
-    }
-    if (isBind(value)) {
-      if (!prop.bindable) throw new Error(raw.type + "." + name + " cannot be bound to state.");
-      if (!paths.has(value.$bind)) {
-        let allowed = [...paths.keys()].join(", ") || "(none)";
-        throw new Error("Unknown renderUI bind path " + JSON.stringify(value.$bind) +
-          ". Allowed bind paths: " + allowed + ".");
+  if (node.type === "ArrayExpression") {
+    let elements = node.elements;
+    if (!Array.isArray(elements)) return rejectAst(source, node, "an array literal");
+    return elements.map((element, index) => {
+      if (element === null || !isAstNode(element)) {
+        throw syntaxError(source, node.start, "array literals cannot contain holes at index " + index + ".");
       }
-      validateValue(paths.get(value.$bind), prop.schema, "state." + value.$bind);
-      props[name] = {$bind: value.$bind};
-    } else {
-      props[name] = validateValue(value, prop.schema, raw.type + "." + name);
-    }
+      if (element.type === "SpreadElement") {
+        return rejectAst(source, element, "an array literal");
+      }
+      return interpretValue(source, element, depth + 1, budget, false) as JsonValue;
+    });
   }
-  let children = [];
-  flattenChildren(raw.children, children, path, depth + 1, counter, paths);
-  if (!component.children && children.length > 0) {
-    throw new Error(raw.type + " does not accept children. Allowed props: " +
-      (allowedProps.join(", ") || "(none)") + ".");
-  }
-  return {type: raw.type, props, children};
-}
 
-export function validateState(state) {
-  return {state, paths: statePaths(state)};
-}
-
-export function validateRenderResult(raw, prepared) {
-  let tree = validateNode(raw, "tree", 0, {count: 0}, prepared.paths);
-  let encoded = JSON.stringify(tree);
-  let bytes = new TextEncoder().encode(encoded).byteLength;
-  if (bytes > MAX_TREE_BYTES) {
-    throw new Error("renderUI tree exceeds the " + MAX_TREE_BYTES + "-byte tree limit.");
-  }
-  return {tree, stateDefaults: prepared.state, catalogVersion: CATALOG_VERSION};
-}
-`;
-
-const HARNESS_SOURCE = `
-import {WorkerEntrypoint} from "cloudflare:workers";
-import render from "user.js";
-import {validateRenderResult, validateState} from "runtime.js";
-
-export default class extends WorkerEntrypoint {
-  async render(stateJson) {
-    try {
-      let prepared = validateState(JSON.parse(stateJson));
-      return JSON.stringify({ok: true, result: validateRenderResult(await render(), prepared)});
-    } catch (error) {
-      return JSON.stringify({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
+  if (node.type === "ObjectExpression") {
+    let result: {[key: string]: JsonValue} = Object.create(null);
+    for (let property of astNodes(source, node.properties, node, "properties")) {
+      enterAst(source, property, depth + 1, budget);
+      if (property.type !== "Property" || property.kind !== "init" ||
+          property.method === true || property.computed === true || property.shorthand === true) {
+        rejectAst(source, property, "an object literal");
+      }
+      let keyNode = astNode(source, property.key, property, "key");
+      enterAst(source, keyNode, depth + 2, budget);
+      let key = objectKey(source, keyNode);
+      if (key === "$bind") {
+        throw syntaxError(source, keyNode.start,
+            "raw $bind objects are not accepted in JSX; use bind(\"path\") instead.");
+      }
+      if (BLOCKED_JSON_KEYS.has(key)) {
+        throw syntaxError(source, keyNode.start, "object key " + JSON.stringify(key) + " is forbidden.");
+      }
+      if (Object.hasOwn(result, key)) {
+        throw syntaxError(source, keyNode.start, "duplicate object key " + JSON.stringify(key) + ".");
+      }
+      let valueNode = astNode(source, property.value, property, "value");
+      Object.defineProperty(result, key, {
+        value: interpretValue(source, valueNode, depth + 2, budget, false) as JsonValue,
+        enumerable: true,
       });
     }
+    return result;
   }
-}
-`;
 
-interface RenderUIEntrypoint extends WorkerEntrypoint {
-  render(stateJson: string): Promise<string>;
+  if (node.type === "CallExpression" && allowBind) {
+    let callee = astNode(source, node.callee, node, "callee");
+    let args = astNodes(source, node.arguments, node, "arguments");
+    if (callee.type !== "Identifier" || callee.name !== "bind" || args.length !== 1) {
+      return rejectAst(source, node, "a prop value");
+    }
+    enterAst(source, callee, depth + 1, budget);
+    let argument = args[0];
+    enterAst(source, argument, depth + 1, budget);
+    if (argument.type !== "Literal" || typeof argument.value !== "string" ||
+        argument.value.length === 0) {
+      throw syntaxError(source, argument.start,
+          "bind() requires exactly one non-empty string literal path.");
+    }
+    return {$bind: argument.value};
+  }
+
+  return rejectAst(source, node, "a prop value");
+}
+
+function jsxName(source: string, value: unknown, parent: AstNode): string {
+  let node = astNode(source, value, parent, "name");
+  if (node.type !== "JSXIdentifier" || typeof node.name !== "string") {
+    return rejectAst(source, node, "a component or prop name");
+  }
+  return node.name;
+}
+
+function interpretAttribute(
+    source: string, attribute: AstNode, depth: number, budget: AstBudget): [string, unknown] {
+  enterAst(source, attribute, depth, budget);
+  if (attribute.type === "JSXSpreadAttribute") {
+    rejectAst(source, attribute, "component props");
+  }
+  if (attribute.type !== "JSXAttribute") {
+    rejectAst(source, attribute, "component props");
+  }
+  let name = jsxName(source, attribute.name, attribute);
+  if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML" ||
+      BLOCKED_JSON_KEYS.has(name)) {
+    throw syntaxError(source, attribute.start, "forbidden prop " + JSON.stringify(name) +
+        " attempts handler or reserved-prop smuggling; event handlers and HTML are never allowed.");
+  }
+  let value = attribute.value;
+  if (value === null) return [name, true];
+
+  let valueNode = astNode(source, value, attribute, "value");
+  if (valueNode.type === "Literal") {
+    enterAst(source, valueNode, depth + 1, budget);
+    return [name, literalValue(source, valueNode)];
+  }
+  if (valueNode.type !== "JSXExpressionContainer") {
+    return rejectAst(source, valueNode, "a prop value");
+  }
+  enterAst(source, valueNode, depth + 1, budget);
+  let expression = astNode(source, valueNode.expression, valueNode, "expression");
+  if (expression.type === "JSXEmptyExpression") {
+    throw syntaxError(source, expression.start, "prop " + name + " has an empty expression.");
+  }
+  return [name, interpretValue(source, expression, depth + 2, budget, true)];
+}
+
+function jsxText(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ") : "";
+}
+
+function interpretChildExpression(
+    source: string, node: AstNode, depth: number, budget: AstBudget):
+    GenerativeUiNode | string | null {
+  if (node.type === "JSXElement") return interpretElement(source, node, depth, budget);
+  let value = interpretValue(source, node, depth, budget, false);
+  if (value === null || typeof value === "boolean") return null;
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  return rejectAst(source, node, "JSX children");
+}
+
+function interpretElement(
+    source: string, element: AstNode, depth: number, budget: AstBudget): GenerativeUiNode {
+  enterAst(source, element, depth, budget);
+  if (element.type !== "JSXElement") return rejectAst(source, element, "the renderUI root");
+
+  let opening = astNode(source, element.openingElement, element, "openingElement");
+  enterAst(source, opening, depth + 1, budget);
+  let type = jsxName(source, opening.name, opening);
+  if (!Object.hasOwn(RENDER_UI_CATALOG, type)) {
+    throw syntaxError(source, opening.start, "Unknown renderUI component " + JSON.stringify(type) +
+        ". Allowed components: " + Object.keys(RENDER_UI_CATALOG).join(", ") + ".");
+  }
+  let component = RENDER_UI_CATALOG[type];
+  let allowedProps = Object.keys(component.props);
+  let props: Record<string, unknown> = Object.create(null);
+  for (let attribute of astNodes(source, opening.attributes, opening, "attributes")) {
+    let [name, value] = interpretAttribute(source, attribute, depth + 2, budget);
+    if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML" ||
+        BLOCKED_JSON_KEYS.has(name)) {
+      throw syntaxError(source, attribute.start, "forbidden prop " + JSON.stringify(name) +
+          " attempts handler or reserved-prop smuggling; event handlers and HTML are never allowed.");
+    }
+    if (!Object.hasOwn(component.props, name)) {
+      throw syntaxError(source, attribute.start, type + " has unknown prop " + JSON.stringify(name) +
+          ". Allowed props: " + (allowedProps.join(", ") || "(none)") + ".");
+    }
+    if (Object.hasOwn(props, name)) {
+      throw syntaxError(source, attribute.start, "duplicate prop " + JSON.stringify(name) + ".");
+    }
+    Object.defineProperty(props, name, {value, enumerable: true});
+  }
+
+  let children: Array<GenerativeUiNode | string> = [];
+  for (let child of astNodes(source, element.children, element, "children")) {
+    if (child.type === "JSXText") {
+      enterAst(source, child, depth + 1, budget);
+      let childText = jsxText(child.value);
+      if (childText.trim()) children.push(childText);
+      continue;
+    }
+    if (child.type === "JSXElement") {
+      children.push(interpretElement(source, child, depth + 1, budget));
+      continue;
+    }
+    if (child.type === "JSXExpressionContainer") {
+      enterAst(source, child, depth + 1, budget);
+      let expression = astNode(source, child.expression, child, "expression");
+      if (expression.type === "JSXEmptyExpression") continue;
+      let interpreted = interpretChildExpression(source, expression, depth + 2, budget);
+      if (interpreted !== null) children.push(interpreted);
+      continue;
+    }
+    rejectAst(source, child, "JSX children");
+  }
+  return {type, props, children};
+}
+
+function parseRootElement(source: string): GenerativeUiNode {
+  let program: AstNode;
+  try {
+    program = JsxParser.parse(source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+    }) as unknown as AstNode;
+  } catch (error) {
+    let detail = error instanceof Error ? error.message : String(error);
+    throw new Error("Invalid renderUI JSX: " + detail, {cause: error});
+  }
+  let body = astNodes(source, program.body, program, "body");
+  if (body.length !== 1 || body[0].type !== "ExpressionStatement") {
+    let received = body.map(statement => statement.type).join(", ") || "empty input";
+    throw syntaxError(source, body[0]?.start ?? 0,
+        "expected exactly one root catalog element; received " + received + ".");
+  }
+  let expression = astNode(source, body[0].expression, body[0], "expression");
+  if (expression.type !== "JSXElement") {
+    return rejectAst(source, expression, "the renderUI root");
+  }
+  return interpretElement(source, expression, 0, {count: 0});
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -981,87 +699,32 @@ function validateNode(
   return {type: value.type, props, children};
 }
 
-/** Independently validate and normalize a tree returned by the untrusted renderUI isolate. */
+/** Independently validate and reconstruct a renderUI tree from unknown input. */
 export function validateRenderUINode(value: unknown): GenerativeUiNode {
   return validateNode(value, "tree", 0, {count: 0});
 }
 
-function validateRenderUIResult(
-    value: unknown, stateDefaults: Record<string, unknown>): GenerativeUiResult {
-  if (!isPlainRecord(value) || value.catalogVersion !== RENDER_UI_CATALOG_VERSION ||
-      !isPlainRecord(value.stateDefaults)) {
-    throw new Error("The renderUI isolate returned an invalid result envelope.");
+/** Parse the literal-only JSX subset and return the validated durable wire result. */
+export async function parseRenderUIJsx(
+    jsxSource: string,
+    stateDefaults: Record<string, unknown> = {}): Promise<GenerativeUiResult> {
+  let sourceBytes = sourceByteLength(jsxSource);
+  if (sourceBytes > MAX_RENDER_UI_SOURCE_BYTES) {
+    throw new Error(`renderUI JSX exceeds the ${MAX_RENDER_UI_SOURCE_BYTES}-byte source limit.`);
   }
-  let tree = validateRenderUINode(value.tree);
+  if (!jsxSource.trim()) throw new Error("renderUI JSX cannot be empty.");
+  assertJsonValue(stateDefaults, "state");
+
+  // The interpreter already consults the catalog while walking the AST. Reconstructing the tree
+  // here is deliberately redundant: persistence never trusts even its own first-pass output.
+  let tree = validateRenderUINode(parseRootElement(jsxSource));
   let treeBytes = sourceByteLength(JSON.stringify(tree));
   if (treeBytes > MAX_RENDER_UI_TREE_BYTES) {
     throw new Error(`renderUI tree exceeds the ${MAX_RENDER_UI_TREE_BYTES}-byte tree limit.`);
   }
-  // Never use the isolate's echoed state: the parent already owns the original tool input and
-  // independently checks it against the returned bind markers.
   let trustedState = structuredClone(stateDefaults);
   validateRenderUIState(tree, trustedState);
   return {tree, stateDefaults: trustedState, catalogVersion: RENDER_UI_CATALOG_VERSION};
-}
-
-/** Execute transformed JSX in a fresh, outbound-disabled Dynamic Worker and return its tree. */
-export async function executeRenderUI(
-    loader: WorkerLoader, jsxSource: string,
-    stateDefaults: Record<string, unknown> = {}): Promise<GenerativeUiResult> {
-  assertJsonValue(stateDefaults, "state");
-  let transformed = transformRenderUIJsx(jsxSource);
-  let worker: WorkerLoaderWorkerCode = {
-    compatibilityDate: "2026-08-01",
-    compatibilityFlags: ["disallow_importable_env"],
-    limits: {cpuMs: RENDER_UI_CPU_MS, subRequests: 0},
-    mainModule: "harness.js",
-    modules: {
-      "harness.js": HARNESS_SOURCE,
-      "runtime.js": RUNTIME_SOURCE,
-      "user.js": `import {jsx, bind} from "runtime.js";\n` +
-          `export default async function renderUIExpression() {\n` +
-          `  return (${transformed});\n` +
-          `}\n`,
-    },
-    env: {},
-    globalOutbound: null,
-  };
-  let entrypoint = loader.load(worker).getEntrypoint<RenderUIEntrypoint>(undefined, {
-    limits: {cpuMs: RENDER_UI_CPU_MS, subRequests: 0},
-  });
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  let timeout = new Promise<never>((_resolve, reject) => {
-    // Production enforces cpuMs directly. This wall-clock fence also covers a program that only
-    // waits, and keeps local workerd versions that do not enforce custom CPU limits from wedging
-    // the parent invocation forever.
-    timeoutId = setTimeout(() => reject(new Error(
-        `renderUI isolate exceeded its ${RENDER_UI_CPU_MS}ms CPU limit.`)),
-    RENDER_UI_CPU_MS * 2);
-  });
-  let invocation = Promise.resolve(entrypoint.render(JSON.stringify(stateDefaults)));
-  let encodedResult: string;
-  try {
-    encodedResult = await Promise.race([invocation, timeout]);
-  } finally {
-    clearTimeout(timeoutId);
-    invocation.catch(() => {});
-    (entrypoint as unknown as {[Symbol.dispose]?(): void})[Symbol.dispose]?.();
-  }
-  if (typeof encodedResult !== "string" ||
-      sourceByteLength(encodedResult) > MAX_RENDER_UI_RESULT_BYTES) {
-    throw new Error(
-        `renderUI isolate response exceeds the parent-enforced ` +
-        `${MAX_RENDER_UI_TREE_BYTES}-byte tree limit and bounded state envelope.`);
-  }
-  let envelope: unknown = JSON.parse(encodedResult);
-  if (!isPlainRecord(envelope) || typeof envelope.ok !== "boolean") {
-    throw new Error("The renderUI isolate returned an invalid response envelope.");
-  }
-  if (!envelope.ok) {
-    throw new Error(typeof envelope.error === "string"
-      ? envelope.error : "The renderUI isolate rejected the expression.");
-  }
-  return validateRenderUIResult(envelope.result, stateDefaults);
 }
 
 /** Return every {$bind:path} marker used by a validated renderUI tree. */

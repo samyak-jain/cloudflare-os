@@ -1,4 +1,4 @@
-import {env, runInDurableObject} from "cloudflare:test";
+import {runInDurableObject} from "cloudflare:test";
 import {exports} from "cloudflare:workers";
 import {newWebSocketRpcSession, type RpcStub} from "capnweb";
 import type {
@@ -9,8 +9,8 @@ import type {
 } from "@gadgets/workshop-shared/api";
 import {describe, expect, it} from "vitest";
 import {
-  executeRenderUI,
   MAX_RENDER_UI_SOURCE_BYTES,
+  parseRenderUIJsx,
   RENDER_UI_CATALOG_VERSION,
   validateRenderUINode,
 } from "../src/render-ui";
@@ -43,14 +43,14 @@ async function createWorkspace(): Promise<{
   return {publicApi, authenticated, workspace};
 }
 
-describe("renderUI Dynamic Worker", () => {
-  it("transforms JSX and returns only the validated wire tree", async () => {
-    let result = await executeRenderUI(
-        env.LOADER,
+describe("literal-only renderUI parser", () => {
+  it("parses JSX and returns only the validated wire tree", async () => {
+    let result = await parseRenderUIJsx(
         `<Card title="Profile"><Stack gap="sm">
           <Heading level={2}>Account</Heading>
           <Input label="Name" value={bind("form.name")} />
-          {["admin", "active"].map(value => <Badge tone="success">{value}</Badge>)}
+          <Badge tone="success">admin</Badge>
+          <Badge tone="success">active</Badge>
           <Button action="save">Save</Button>
         </Stack></Card>`,
         {form: {name: "Ada"}});
@@ -76,7 +76,7 @@ describe("renderUI Dynamic Worker", () => {
   });
 
   it("accepts the documented v1 prop spellings, aliases, and array bind paths", async () => {
-    let result = await executeRenderUI(env.LOADER, `<Stack gap="lg">
+    let result = await parseRenderUIJsx(`<Stack gap="lg">
       <Row align="BASELINE" justify="between" wrap={false}>
         <Card title="Deploy" description="Production">
           <Text label="Ready" tone="BRAND" size="lg" strong mono />
@@ -108,46 +108,44 @@ describe("renderUI Dynamic Worker", () => {
   });
 
   it("rejects unknown components and lists the catalog", async () => {
-    await expect(executeRenderUI(env.LOADER, `<Marquee>Hi</Marquee>`)).rejects.toThrow(
+    await expect(parseRenderUIJsx(`<Marquee>Hi</Marquee>`)).rejects.toThrow(
         /Unknown renderUI component.*Allowed components:.*Stack.*KeyValue/s);
   });
 
   it("rejects unknown and invalid props with allowed values", async () => {
-    await expect(executeRenderUI(env.LOADER, `<Text color="purple">Hi</Text>`)).rejects.toThrow(
+    await expect(parseRenderUIJsx(`<Text color="purple">Hi</Text>`)).rejects.toThrow(
         /unknown prop.*Allowed props: label, tone, size, strong, mono/s);
-    await expect(executeRenderUI(env.LOADER, `<Badge tone="sparkly">Hi</Badge>`)).rejects.toThrow(
+    await expect(parseRenderUIJsx(`<Badge tone="sparkly">Hi</Badge>`)).rejects.toThrow(
         /must be one of/);
   });
 
   it.each(["onClick", "onMouseEnter", "dangerouslySetInnerHTML"])(
       "rejects handler-smuggling prop %s", async (prop) => {
-        await expect(executeRenderUI(
-            env.LOADER, `<Button action="save" ${prop}={() => 1}>Save</Button>`))
-            .rejects.toThrow(/smuggle handler prop.*never allowed/s);
+        await expect(parseRenderUIJsx(
+            `<Button action="save" ${prop}={() => 1}>Save</Button>`))
+            .rejects.toThrow(/forbidden prop.*never allowed/s);
       });
 
-  it("rejects oversized source before loading an isolate", async () => {
+  it("rejects oversized source before parsing", async () => {
     let source = `<Text>${"x".repeat(MAX_RENDER_UI_SOURCE_BYTES)}</Text>`;
-    await expect(executeRenderUI(env.LOADER, source)).rejects.toThrow(/source limit/);
+    await expect(parseRenderUIJsx(source)).rejects.toThrow(/source limit/);
   });
 
-  it("rejects a validated tree over 256 KiB", async () => {
-    await expect(executeRenderUI(
-        env.LOADER,
+  it("structurally rejects the model-authored oversized-tree generator", async () => {
+    await expect(parseRenderUIJsx(
         `<Stack>{Array.from({length: 3000}, (_, i) =>
           <Text>{String(i).padEnd(100, "x")}</Text>)}</Stack>`))
-        .rejects.toThrow(/262144-byte tree limit/);
+        .rejects.toThrow(/CallExpression is not allowed/);
   });
 
-  it("enforces the tree cap in the parent when the isolate stubs TextEncoder", async () => {
-    await expect(executeRenderUI(
-        env.LOADER,
+  it("structurally rejects the TextEncoder-stubbing 19.8MB-tree exploit", async () => {
+    await expect(parseRenderUIJsx(
         `(() => {
           globalThis.TextEncoder = class { encode() { return {byteLength: 0}; } };
           return <Stack>{Array.from({length: 280}, () =>
             <Text>{"y".repeat(1000)}</Text>)}</Stack>;
         })()`))
-        .rejects.toThrow(/parent-enforced|262144-byte tree limit/);
+        .rejects.toThrow(/CallExpression is not allowed/);
   });
 
   it("authoritatively rejects hostile props and schemas in the parent", async () => {
@@ -160,7 +158,7 @@ describe("renderUI Dynamic Worker", () => {
       type: "Badge", props: {tone: "sparkly"}, children: [],
     })).toThrow(/must be one of/);
 
-    await expect(executeRenderUI(env.LOADER, `(() => {
+    await expect(parseRenderUIJsx(`(() => {
       const realKeys = Object.keys, realEntries = Object.entries;
       const evil = {
         dangerouslySetInnerHTML: {schema: {type: "scalar"}, optional: true},
@@ -172,7 +170,7 @@ describe("renderUI Dynamic Worker", () => {
       Object.entries = value => value && value.tone && value.strong && value.mono
         ? realEntries(evil) : realEntries(value);
       return <Text label="visible" dangerouslySetInnerHTML="bad" onClick="bad">hi</Text>;
-    })()`)).rejects.toThrow(/forbidden prop.*dangerouslySetInnerHTML/);
+    })()`)).rejects.toThrow(/CallExpression is not allowed/);
   });
 
   it.each([
@@ -181,20 +179,42 @@ describe("renderUI Dynamic Worker", () => {
     `require("node:fs")`,
     `import x from "somewhere"`,
   ])("rejects module access: %s", async (source) => {
-    await expect(executeRenderUI(env.LOADER, source)).rejects.toThrow(/cannot (import|call require)/);
+    await expect(parseRenderUIJsx(source)).rejects.toThrow(/not allowed|expected exactly one/);
   });
 
-  it("keeps UTF-16 masking aligned around an import expression", async () => {
-    await expect(executeRenderUI(env.LOADER, `(async () => {
+  it("rejects dynamic import hidden in a template interpolation", async () => {
+    let tick = String.fromCharCode(96);
+    let source = "<Text label={" + tick +
+      "${Object.keys(await import(\"cloudflare:workers\"))}" + tick + "} />";
+    await expect(parseRenderUIJsx(source)).rejects.toThrow(/TemplateLiteral is not allowed/);
+  });
+
+  it.each([
+    ["identifier", "<Text label={value} />"],
+    ["member expression", "<Text label={globalThis.secret} />"],
+    ["ordinary call", "<Text label={String(1)} />"],
+    ["function", "<Text label={function () {}} />"],
+    ["arrow", "<Text label={() => 1} />"],
+    ["operator", "<Text label={1 + 2} />"],
+    ["conditional", "<Text label={true ? 'a' : 'b'} />"],
+    ["array spread", "<Select options={['a', ...items]} />"],
+    ["object spread", "<Table rows={[{...row}]} />"],
+    ["raw bind marker", "<Input value={{$bind:'name'}} />"],
+    ["non-literal bind path", "<Input value={bind(path)} />"],
+  ])("rejects non-literal syntax: %s", async (_name, source) => {
+    await expect(parseRenderUIJsx(source)).rejects.toThrow(/not allowed|use bind|string literal/);
+  });
+
+  it("structurally rejects an emoji-adjacent import expression", async () => {
+    await expect(parseRenderUIJsx(`(async () => {
       let padding = "🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉";
       let module = await import("cloudflare:workers");
       return <Text label={padding + String(module)} />;
-    })()`)).rejects.toThrow(/cannot import/);
+    })()`)).rejects.toThrow(/CallExpression is not allowed/);
   });
 
   it("does not scan inert JSX text as executable code", async () => {
-    let result = await executeRenderUI(
-        env.LOADER,
+    let result = await parseRenderUIJsx(
         `<Text>You can import data, call require(x), or discuss while (true) here.</Text>`);
     expect(result.tree.children).toEqual([
       "You can import data, call require(x), or discuss while (true) here.",
@@ -202,54 +222,36 @@ describe("renderUI Dynamic Worker", () => {
   });
 
   it("rejects unknown, mistyped, and non-bindable state paths", async () => {
-    await expect(executeRenderUI(
-        env.LOADER, `<Input value={bind("form.missing")} />`, {form: {name: "Ada"}}))
-        .rejects.toThrow(/Unknown renderUI bind path.*Allowed bind paths: form.name/s);
-    await expect(executeRenderUI(
-        env.LOADER, `<Checkbox checked={bind("form.name")} />`, {form: {name: "Ada"}}))
+    await expect(parseRenderUIJsx(
+        `<Input value={bind("form.missing")} />`, {form: {name: "Ada"}}))
+        .rejects.toThrow(/Unknown renderUI state path.*Allowed bind paths: form.missing/s);
+    await expect(parseRenderUIJsx(
+        `<Checkbox checked={bind("form.name")} />`, {form: {name: "Ada"}}))
         .rejects.toThrow(/state\.form\.name must be a boolean/);
-    await expect(executeRenderUI(
-        env.LOADER, `<Text tone={bind("tone")}>Hi</Text>`, {tone: "info"}))
+    await expect(parseRenderUIJsx(
+        `<Text tone={bind("tone")}>Hi</Text>`, {tone: "info"}))
         .rejects.toThrow(/Text\.tone cannot be bound/);
-    await expect(executeRenderUI(
-        env.LOADER, `<Input value={bind("form.name")} />`,
+    await expect(parseRenderUIJsx(
+        `<Input value={bind("form.name")} />`,
         {form: {name: "Ada"}, junk: "model-authored"}))
         .rejects.toThrow(/Unknown renderUI state path "junk"/);
   });
 
-  it("terminates an infinite loop at the isolate CPU limit", async () => {
-    await expect(executeRenderUI(
-        env.LOADER, `<Stack>{(() => { while (true) {} })()}</Stack>`))
-        .rejects.toThrow(/CPU|limit|exceeded/i);
+  it("structurally rejects a sync loop without running it", async () => {
+    await expect(parseRenderUIJsx(
+        `<Stack>{(() => { while (1) {} })()}</Stack>`))
+        .rejects.toThrow(/CallExpression is not allowed/);
   });
 
-  it("applies the hard CPU and outbound limits to every Dynamic Worker", async () => {
-    let workerCode: WorkerLoaderWorkerCode | undefined;
-    let entrypointOptions: WorkerEntrypointOptions | undefined;
-    let loader = {
-      load(code: WorkerLoaderWorkerCode) {
-        workerCode = code;
-        return {
-          getEntrypoint(_name: string | undefined, options: WorkerEntrypointOptions) {
-            entrypointOptions = options;
-            return {render: async () => JSON.stringify({
-              ok: true,
-              result: {
-                tree: {type: "Text", props: {}, children: ["Hi"]},
-                stateDefaults: {},
-                catalogVersion: RENDER_UI_CATALOG_VERSION,
-              },
-            })};
-          },
-        };
-      },
-    } as unknown as WorkerLoader;
+  it("enforces depth, syntax, and component-node budgets while walking", async () => {
+    let deep = "<Stack>".repeat(70) + "x" + "</Stack>".repeat(70);
+    await expect(parseRenderUIJsx(deep)).rejects.toThrow(/maximum depth/);
 
-    await executeRenderUI(loader, `<Text>Hi</Text>`);
-    expect(workerCode).toMatchObject({
-      env: {}, globalOutbound: null, limits: {cpuMs: 1_000, subRequests: 0},
-    });
-    expect(entrypointOptions).toMatchObject({limits: {cpuMs: 1_000, subRequests: 0}});
+    let wide = "<Stack>" + "<Row/>".repeat(5_001) + "</Stack>";
+    await expect(parseRenderUIJsx(wide)).rejects.toThrow(/5000-node limit/);
+
+    let syntaxHeavy = "<Table rows={[" + "0,".repeat(19_999) + "0]} />";
+    await expect(parseRenderUIJsx(syntaxHeavy)).rejects.toThrow(/syntax budget/);
   });
 });
 

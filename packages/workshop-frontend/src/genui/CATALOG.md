@@ -7,16 +7,21 @@ teach the model.
 
 Conventions used throughout:
 
-- **`$bind`** — any prop marked *bindable* may hold `{ "$bind": "dot.path" }` instead of a literal.
-  The path addresses `stateDefaults` as a plain object tree; array indices are numeric segments
-  (`tags.0`). A control whose value prop is not bound renders read-only, because there is nowhere
-  for its edits to go.
+- **`bind("dot.path")`** — this is the one callable form accepted in JSX, and only for props
+  marked *bindable*. The parser converts it to the wire marker `{ "$bind": "dot.path" }`;
+  writing that object directly in JSX is rejected. The path addresses `stateDefaults` as a
+  plain object tree; array indices are numeric segments (`tags.0`). A control whose value prop
+  is not bound renders read-only, because there is nowhere for its edits to go.
+- **JSX is literal-only data.** Braced props accept string, number, boolean and null literals,
+  literal arrays/objects, or the exact `bind("path")` form. Identifiers, other calls, template
+  literals, functions, operators, spreads, conditionals, imports and loops are rejected.
+  Children are catalog elements, text, or scalar literals.
 - **Variant props are matched case-insensitively**, and an unrecognized value falls back to the
   default rather than failing the card.
 - **Numbers may arrive as numeric strings** (`max="100"`), which is what a JSX attribute often is.
 - **Children** are other catalog elements and text. Components marked *text* below take their
   content from children, or from a `label` prop when they have no children.
-- Everything not listed is ignored. Nothing is required except where stated.
+- The backend rejects everything not listed. Nothing is required except where stated.
 
 ## Layout
 
