@@ -36,9 +36,14 @@ Conventions used throughout:
   or member calls, arrows outside direct `.map`, block-bodied callbacks, declarations, loops,
   assignments, updates, `new`, spreads, tagged templates, sequence expressions, optional access,
   and the keys `__proto__`, `constructor`, and `prototype`.
-- **Variant props are matched case-insensitively**, and an unrecognized value falls back to the
-  default rather than failing the card.
+- **Variant props are matched case-insensitively.** The backend rejects a value outside the listed
+  set -- including a number, which has no spelling in a variant -- and the error names the allowed
+  words, so `gap={2}` is a tool error rather than a guess. (The *renderer* is separately total: a
+  stored tree carrying an unrecognized variant falls back to the default instead of failing.)
 - **Numbers may arrive as numeric strings** (`max="100"`), which is what a JSX attribute often is.
+- **Free display text also accepts a number** and formats it: `label={42}` renders `42`. This
+  covers labels, titles, subtitles, descriptions, hints, placeholders and valueLabels -- but not
+  `Button.action`, `Table` column `key`, or bindable `value` props, whose types stay exact.
 - **Children** are other catalog elements and text. Components marked *text* below take their
   content from children, or from a `label` prop when they have no children.
 - The backend rejects everything not listed. Nothing is required except where stated.

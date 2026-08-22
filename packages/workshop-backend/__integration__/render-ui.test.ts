@@ -275,6 +275,59 @@ describe("bounded renderUI expression interpreter", () => {
         /must be one of/);
   });
 
+  it("names the allowed values when an enum prop is given the wrong type", async () => {
+    // Regression: a model wrote <Stack gap={2}> and got only "must be a string", which withholds
+    // the vocabulary it needed to correct itself. A type mismatch on an enum reports the same
+    // allowed list a wrong value does.
+    await expect(parseRenderUIJsx(`<Stack gap={2}><Text>Hi</Text></Stack>`)).rejects.toThrow(
+        `Stack.gap must be one of: "none" | "xs" | "sm" | "md" | "lg".`);
+    await expect(parseRenderUIJsx(`<Badge tone={1}>Hi</Badge>`)).rejects.toThrow(
+        /Badge\.tone must be one of: "neutral" \| "brand"/);
+    await expect(parseRenderUIJsx(`<Text size={3}>Hi</Text>`)).rejects.toThrow(
+        `Text.size must be one of: "sm" | "md" | "lg".`);
+  });
+
+  it("formats numbers written into free display text", async () => {
+    let result = await parseRenderUIJsx(
+        `<Card title={2024}>` +
+          `<Text label={42} />` +
+          `<Input label={1} placeholder={2} description={3} hint={4} />` +
+          `<KeyValue items={[{label: 7, value: 8}]} />` +
+          `<Table columns={[{key: "a", label: 3}]} rows={[{a: 1}]} />` +
+        `</Card>`);
+    expect(result.tree.props.title).toBe("2024");
+    expect(result.tree.children[0]).toMatchObject({type: "Text", props: {label: "42"}});
+    expect(result.tree.children[1]).toMatchObject({
+      type: "Input", props: {label: "1", placeholder: "2", description: "3", hint: "4"},
+    });
+    // Only the label is display text; a KeyValue value is a scalar and stays a number.
+    expect(result.tree.children[2]).toMatchObject({
+      type: "KeyValue", props: {items: [{label: "7", value: 8}]},
+    });
+    expect(result.tree.children[3]).toMatchObject({
+      type: "Table", props: {columns: [{key: "a", label: "3"}], rows: [{a: 1}]},
+    });
+  });
+
+  it("keeps identifiers, bindable props, and non-numbers strict", async () => {
+    // Matched later by hasRenderUIButtonAction / column lookup, so the type stays exact.
+    await expect(parseRenderUIJsx(`<Button action={1}>Go</Button>`)).rejects.toThrow(
+        "Button.action must be a string.");
+    await expect(parseRenderUIJsx(`<Table columns={[{key: 2}]} />`)).rejects.toThrow(
+        /Table\.columns\[0\]\.key must be a string/);
+    // Bindable: the runtime type is part of the bound-state contract.
+    await expect(parseRenderUIJsx(`<Select value={2} />`)).rejects.toThrow(
+        "Select.value must be a string.");
+    // Coercion is numbers only; it never stringifies other JSON.
+    await expect(parseRenderUIJsx(`<Text label={true} />`)).rejects.toThrow(
+        "Text.label must be a string.");
+    await expect(parseRenderUIJsx(`<Text label={null} />`)).rejects.toThrow(
+        "Text.label must be a string.");
+    // Numeric props that already accepted numbers keep their numeric type.
+    let numeric = await parseRenderUIJsx(`<Slider min={0} max={10} step={2} />`);
+    expect(numeric.tree.props).toMatchObject({min: 0, max: 10, step: 2});
+  });
+
   it.each(["onClick", "onMouseEnter", "dangerouslySetInnerHTML"])(
       "rejects handler-smuggling prop %s", async (prop) => {
         await expect(parseRenderUIJsx(

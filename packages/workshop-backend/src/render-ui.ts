@@ -51,6 +51,15 @@ type StringSchema = {
   minLength?: number;
   maxLength?: number;
   caseInsensitive?: boolean;
+  /**
+   * Accept a number and format it with `String()`.
+   *
+   * Set only on free display text, where `label={42}` is unambiguous. Never set on an enum (a
+   * number has no documented spelling there), on an identifier that is matched later
+   * (`Button.action`, `Table.columns[].key`), or on a bindable prop, whose runtime type is part
+   * of the bound-state contract.
+   */
+  coerceNumber?: boolean;
 };
 type NumberSchema = {type: "number"; min?: number; max?: number; coerce?: boolean};
 type BooleanSchema = {type: "boolean"};
@@ -80,8 +89,12 @@ const choice = (values: string[]): StringSchema =>
   string({enum: values, caseInsensitive: true});
 const numeric = (options: Omit<NumberSchema, "type" | "coerce"> = {}): NumberSchema =>
   number({...options, coerce: true});
-const text = string({maxLength: 4_096});
-const label = string({maxLength: 256});
+/** Free display text. Numbers are formatted rather than rejected; see StringSchema.coerceNumber. */
+const displayText = (maxLength: number): StringSchema =>
+  string({maxLength, coerceNumber: true});
+const text = displayText(4_096);
+const label = displayText(256);
+const hint = displayText(512);
 const spacing = choice(["none", "xs", "sm", "md", "lg"]);
 const stringOrNumber: UnionSchema = {type: "union", variants: [string(), numeric()]};
 const selectOptions: ArraySchema = {
@@ -165,8 +178,8 @@ export const RENDER_UI_CATALOG: Record<string, ComponentSchema> = {
     children: false,
     props: {
       value: optional(stringOrNumber, true), label: optional(label),
-      placeholder: optional(string({maxLength: 512})),
-      description: optional(string({maxLength: 512})), hint: optional(string({maxLength: 512})),
+      placeholder: optional(hint),
+      description: optional(hint), hint: optional(hint),
       type: optional(choice(["text", "number", "email", "url", "search", "tel", "password"])),
     },
   },
@@ -174,14 +187,14 @@ export const RENDER_UI_CATALOG: Record<string, ComponentSchema> = {
     children: false,
     props: {
       value: optional(string(), true), options: optional(selectOptions),
-      label: optional(label), placeholder: optional(string({maxLength: 512})),
+      label: optional(label), placeholder: optional(hint),
     },
   },
   Checkbox: {
     children: true,
     props: {
       checked: optional(boolean, true), label: optional(label),
-      description: optional(string({maxLength: 512})),
+      description: optional(hint),
     },
   },
   Slider: {
@@ -1034,17 +1047,28 @@ function schemaName(schema: ValueSchema): string {
 function validateCatalogValue(value: unknown, schema: ValueSchema, path: string): JsonValue {
   switch (schema.type) {
     case "string": {
-      if (typeof value !== "string") throw new Error(`${path} must be a string.`);
-      if (schema.minLength !== undefined && value.length < schema.minLength) {
+      let normalized: string;
+      if (typeof value === "string") {
+        normalized = value;
+      } else if (schema.coerceNumber && typeof value === "number" && Number.isFinite(value)) {
+        normalized = String(value);
+      } else {
+        // An enum reports its vocabulary even on a type mismatch: a model that wrote gap={2}
+        // needs the allowed spellings, not just "must be a string".
+        throw new Error(schema.enum
+          ? `${path} must be one of: ${schemaName(schema)}.`
+          : `${path} must be a string.`);
+      }
+      if (schema.minLength !== undefined && normalized.length < schema.minLength) {
         throw new Error(`${path} must not be empty.`);
       }
-      if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+      if (schema.maxLength !== undefined && normalized.length > schema.maxLength) {
         throw new Error(`${path} exceeds its ${schema.maxLength}-character limit.`);
       }
-      if (!schema.enum) return value;
+      if (!schema.enum) return normalized;
       let matched = schema.caseInsensitive
-        ? schema.enum.find(candidate => candidate.toLowerCase() === value.toLowerCase())
-        : schema.enum.find(candidate => candidate === value);
+        ? schema.enum.find(candidate => candidate.toLowerCase() === normalized.toLowerCase())
+        : schema.enum.find(candidate => candidate === normalized);
       if (matched === undefined) {
         throw new Error(`${path} must be one of: ${schemaName(schema)}.`);
       }
