@@ -1,3 +1,5 @@
+import { createWorkshopLogger } from "./observability.js";
+
 /** Cloudflare Access settings required to verify an assertion. */
 export type AccessEnv = Readonly<{
   ACCESS_TEAM_DOMAIN?: string;
@@ -32,9 +34,13 @@ type AccessCertCacheOptions = {
 };
 
 const DEFAULT_CERT_TTL_SECONDS = 300;
+const MIN_CERT_TTL_SECONDS = 60;
 const MAX_CERT_TTL_SECONDS = 86_400;
+const NBF_CLOCK_SKEW_SECONDS = 60;
 const UNKNOWN_KID_REFRESH_INTERVAL_MS = 30_000;
 const TEAM_DOMAIN_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudflareaccess\.com$/;
+const logger = createWorkshopLogger("workshop.access");
+const loggedConfigurationErrors = new Set<string>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -64,8 +70,19 @@ function cacheTtlSeconds(response: Response): number {
   const cacheControl = response.headers.get("cache-control") ?? "";
   const match = cacheControl.match(/(?:^|,)\s*max-age=(\d+)/i);
   const seconds = match ? Number(match[1]) : DEFAULT_CERT_TTL_SECONDS;
-  return Math.min(Number.isSafeInteger(seconds) ? seconds : DEFAULT_CERT_TTL_SECONDS,
-      MAX_CERT_TTL_SECONDS);
+  return Math.max(MIN_CERT_TTL_SECONDS,
+      Math.min(Number.isSafeInteger(seconds) ? seconds : DEFAULT_CERT_TTL_SECONDS,
+          MAX_CERT_TTL_SECONDS));
+}
+
+function logConfigurationErrorOnce(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (loggedConfigurationErrors.has(message)) return;
+  loggedConfigurationErrors.add(message);
+  logger.error("invalid Cloudflare Access configuration", {
+    event: "auth.access.configuration.invalid",
+    error,
+  });
 }
 
 async function importCerts(value: unknown): Promise<Map<string, CryptoKey>> {
@@ -205,10 +222,16 @@ export async function verifyAccessJwtAssertion(
     assertion: string | null,
     env: AccessEnv,
     options: VerifyAccessOptions = {}): Promise<AccessJwtPayload | null> {
+  let config: AccessConfig | null;
   try {
-    const config = configuredAccess(env);
-    if (!config || !assertion) return null;
+    config = configuredAccess(env);
+  } catch (error) {
+    logConfigurationErrorOnce(error);
+    return null;
+  }
+  if (!config || !assertion) return null;
 
+  try {
     const segments = assertion.split(".");
     if (segments.length !== 3) return null;
     const [protectedSegment, payloadSegment, signatureSegment] = segments;
@@ -234,7 +257,7 @@ export async function verifyAccessJwtAssertion(
     if (payload.iss !== config.issuer || !validAudience(payload.aud, config.audience) ||
         typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || now >= payload.exp ||
         (payload.nbf !== undefined && (typeof payload.nbf !== "number" ||
-          !Number.isFinite(payload.nbf) || now < payload.nbf))) {
+          !Number.isFinite(payload.nbf) || now + NBF_CLOCK_SKEW_SECONDS < payload.nbf))) {
       return null;
     }
     return payload;

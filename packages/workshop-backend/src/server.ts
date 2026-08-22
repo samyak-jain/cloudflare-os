@@ -17,13 +17,13 @@ import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
-import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
+import { GatekeeperConnectCallbackImpl, normalizeAccessEmail, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import { verifyAccessJwtAssertion } from "./access.js";
+import { hasAccessConfiguration, verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -612,6 +612,7 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
     headers: {
       "Content-Type": contentType,
       "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
@@ -638,8 +639,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
-      private accessAssertion: string | null,
-      private accessRequestIsSameOrigin: boolean) {
+      private accessEmail: string | null) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
@@ -696,30 +696,19 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   authenticateFromCfAccess(): Promise<AuthenticatedApi> {
     // More than one frontend hook can share this PublicApi connection. Coalesce them so one
-    // WebSocket handshake verifies and issues at most one stored session.
+    // verified request provisions at most once.
     return this.accessAuthentication ??= this.#authenticateFromCfAccess();
   }
 
   async #authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    // Access credentials are ambient on the WebSocket handshake, so bind their use to the
-    // first-party origin. Otherwise a hostile page could open this endpoint cross-origin and turn
-    // the operator's Access cookie into an authenticated capability.
-    if (!this.accessRequestIsSameOrigin) {
+    if (!this.accessEmail) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
 
-    const payload = await verifyAccessJwtAssertion(this.accessAssertion, this.env);
-    if (!payload || typeof payload.email !== "string" || payload.email.length === 0) {
-      throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
-    }
-
-    const email = payload.email;
+    const email = this.accessEmail;
     let userId = this.users.idFromName(email);
     const user = this.users.get(userId);
-    const { secret, accountCreated } = await user.loginOrCreateViaAccess(email);
-    // Access uses the exact same stored session issuance and authentication path as every other
-    // login. The returned AuthenticatedApi is therefore no more privileged than authenticate().
-    await user.authenticate(secret);
+    const accountCreated = await user.provisionViaAccess(email);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
@@ -736,6 +725,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
+    if (hasAccessConfiguration(this.env)) {
+      throw new Error("This deployment requires Cloudflare Access authentication.");
+    }
     if (!isPasswordAuthEnabled(this.env)) {
       throw new Error("Password login is disabled on this deployment. Use a sign-in option.");
     }
@@ -757,6 +749,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
       : Promise<string | null> {
+    if (hasAccessConfiguration(this.env)) {
+      throw new Error("This deployment requires Cloudflare Access authentication.");
+    }
     if (!isPasswordAuthEnabled(this.env)) {
       throw new Error("Password signup is disabled on this deployment. Use a sign-in option.");
     }
@@ -829,6 +824,27 @@ export default {
     }
 
     if (url.pathname === "/api") {
+      let accessEmail: string | null = null;
+      if (hasAccessConfiguration(env)) {
+        // Access credentials are ambient on both WebSocket and HTTP-batch requests. Refuse the
+        // request before constructing any public RPC capability unless the browser origin is exact
+        // and the assertion is fully verified. This also keeps Cap'n Web's permissive batch CORS
+        // response unreachable cross-origin on an Access deployment.
+        if (req.headers.get("origin") !== url.origin) {
+          return new Response("Cross-origin API access not allowed.", { status: 403 });
+        }
+
+        const payload = await verifyCfAccessJwt(req, env);
+        if (!payload || typeof payload.email !== "string") {
+          return new Response("Invalid Cloudflare Access assertion.", { status: 403 });
+        }
+        try {
+          accessEmail = normalizeAccessEmail(payload.email);
+        } catch {
+          return new Response("Invalid Cloudflare Access email claim.", { status: 403 });
+        }
+      }
+
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
@@ -866,8 +882,7 @@ export default {
               ctx,
               env,
               abortSession,
-              req.headers.get("cf-access-jwt-assertion"),
-              req.headers.get("origin") === url.origin),
+              accessEmail),
           { abortSignal: abortController.signal });
     }
 

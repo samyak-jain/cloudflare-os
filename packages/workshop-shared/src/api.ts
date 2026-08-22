@@ -1052,6 +1052,9 @@ export type AuthVendorInfo = {
  * Returned by `PublicApi.getServerConfig()`. Contains no secrets.
  */
 export type ServerConfig = {
+  /** Whether the API requires a same-origin, verified Cloudflare Access assertion. */
+  accessAuthEnabled: boolean;
+
   /**
    * Auth-capable, allowlisted gatekeeper vendors offered as sign-in methods. Empty when none are
    * configured (password-only).

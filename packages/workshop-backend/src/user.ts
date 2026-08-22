@@ -390,9 +390,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async #loginOrCreateFromVerifiedEmail(
-      email: string,
-      allowCreate: boolean): Promise<{ secret: string; accountCreated: boolean } | null> {
+  #provisionFromVerifiedEmail(email: string, allowCreate: boolean): boolean | null {
     let accountCreated = false;
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
@@ -404,22 +402,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       });
       accountCreated = true;
     }
-    return { secret: await this.#newSessionToken(), accountCreated };
+    return accountCreated;
   }
 
   async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
-    return (await this.#loginOrCreateFromVerifiedEmail(email, allowCreate))?.secret ?? null;
+    const accountCreated = this.#provisionFromVerifiedEmail(email, allowCreate);
+    return accountCreated === null ? null : this.#newSessionToken();
   }
 
   /**
-   * Establishes a normal app session for a signature-verified Cloudflare Access email. Access is
-   * the deployment's signup policy, so first use always provisions the email-keyed account with
-   * no password credential at all (stronger than an unknown random password: every password login
-   * fails); subsequent uses mint another ordinary stored session for the same account.
+   * Provisions the account for a signature-verified, normalized Cloudflare Access email. Access is
+   * the deployment's signup policy, so first use always creates the email-keyed account with no
+   * password credential. No app session is minted: the request's verified Access assertion is the
+   * credential for the returned RPC capability, and a discarded permanent session row would only
+   * leak storage on every reconnect.
    */
-  async loginOrCreateViaAccess(
-      email: string): Promise<{ secret: string; accountCreated: boolean }> {
-    return (await this.#loginOrCreateFromVerifiedEmail(email, true))!;
+  async provisionViaAccess(email: string): Promise<boolean> {
+    email = normalizeAccessEmail(email);
+    return this.#provisionFromVerifiedEmail(email, true)!;
   }
 
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
@@ -1770,4 +1770,16 @@ export function normalizeUsername(username: string) {
   }
 
   return username;
+}
+
+/** Normalize a verified IdP email while keeping its DO namespace disjoint from app usernames. */
+export function normalizeAccessEmail(email: string): string {
+  const normalized = email.toLowerCase().normalize("NFC");
+  // The `@` is not legal in normalizeUsername(), so a verified-email DO can never collide with a
+  // password-account DO. Requiring one non-whitespace local and domain part makes that invariant
+  // explicit instead of relying on Cloudflare's current claim shape.
+  if (!/^[^\s@]+@[^\s@]+$/.test(normalized)) {
+    throw new Error("Cloudflare Access email claim was not a valid email address.");
+  }
+  return normalized;
 }

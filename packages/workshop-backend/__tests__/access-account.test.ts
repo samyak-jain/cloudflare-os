@@ -1,31 +1,31 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { UserDurableObject } from "../src/user.js";
+import {
+  normalizeAccessEmail,
+  normalizeUsername,
+  UserDurableObject,
+} from "../src/user.js";
 
 const users = (env as unknown as {
   TEST_USER: DurableObjectNamespace<UserDurableObject>;
 }).TEST_USER;
 
 describe("Cloudflare Access account mapping", () => {
-  it("auto-provisions an email-keyed passwordless account and issues a normal session", async () => {
+  it("auto-provisions an email-keyed passwordless account without creating a session", async () => {
     const email = "new-access-user@example.com";
     const id = users.idFromName(email);
 
     await runInDurableObject(users.get(id), async (user: UserDurableObject) => {
-      const first = await user.loginOrCreateViaAccess(email);
-      expect(first.accountCreated).toBe(true);
-      await expect(user.authenticate(first.secret)).resolves.toBeUndefined();
+      await expect(user.provisionViaAccess(email)).resolves.toBe(true);
       await expect(user.whoami()).resolves.toEqual({
         type: "user",
         id: email,
         name: "new-access-user",
       });
       await expect(user.hasPasswordLogin()).resolves.toBe(false);
+      await expect(user.authenticate(new Uint8Array(32).toBase64())).rejects.toThrow();
 
-      const second = await user.loginOrCreateViaAccess(email);
-      expect(second.accountCreated).toBe(false);
-      expect(second.secret).not.toBe(first.secret);
-      await expect(user.authenticate(second.secret)).resolves.toBeUndefined();
+      await expect(user.provisionViaAccess(email)).resolves.toBe(false);
     });
   });
 
@@ -34,18 +34,29 @@ describe("Cloudflare Access account mapping", () => {
     const id = users.idFromName(email);
 
     await runInDurableObject(users.get(id), async (user: UserDurableObject) => {
-      const passwordHash = crypto.getRandomValues(new Uint8Array(32));
-      await expect(user.createAccount(email, "Existing Operator", passwordHash))
-        .resolves.not.toBeNull();
+      await user.provisionViaAccess(email);
+      await user.setOwnDisplayName("Existing Operator");
 
-      const session = await user.loginOrCreateViaAccess(email);
-      expect(session.accountCreated).toBe(false);
-      await expect(user.authenticate(session.secret)).resolves.toBeUndefined();
+      await expect(user.provisionViaAccess(email)).resolves.toBe(false);
       await expect(user.whoami()).resolves.toMatchObject({
         id: email,
         name: "Existing Operator",
       });
-      await expect(user.hasPasswordLogin()).resolves.toBe(true);
+      await expect(user.hasPasswordLogin()).resolves.toBe(false);
+    });
+  });
+
+  it("lowercases and NFC-normalizes email keys into a namespace disjoint from usernames", async () => {
+    const rawEmail = "Ope\u0301rator@Example.COM";
+    const email = "opérator@example.com";
+    expect(normalizeAccessEmail(rawEmail)).toBe(email);
+    expect(() => normalizeUsername(email)).toThrow();
+    expect(() => normalizeAccessEmail("operator")).toThrow();
+
+    const id = users.idFromName(email);
+    await runInDurableObject(users.get(id), async (user: UserDurableObject) => {
+      await user.provisionViaAccess(rawEmail);
+      await expect(user.whoami()).resolves.toMatchObject({ id: email, name: "opérator" });
     });
   });
 });

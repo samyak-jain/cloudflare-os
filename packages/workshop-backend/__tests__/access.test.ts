@@ -107,7 +107,7 @@ describe("Cloudflare Access JWT verification", () => {
     ["wrong audience", { aud: "other-audience" }],
     ["wrong issuer", { iss: "https://other.cloudflareaccess.com" }],
     ["expired", { exp: NOW_SECONDS }],
-    ["not yet valid", { nbf: NOW_SECONDS + 1 }],
+    ["not yet valid beyond clock skew", { nbf: NOW_SECONDS + 61 }],
     ["missing expiration", { exp: undefined }],
   ])("rejects a token with %s", async (_name, claims) => {
     const { cache } = certCache([firstKey.jwk]);
@@ -117,6 +117,14 @@ describe("Cloudflare Access JWT verification", () => {
   it("rejects a bad signature even when the declared kid exists", async () => {
     const { cache } = certCache([firstKey.jwk]);
     await expect(verify(await token({ key: secondKey, kid: firstKey.kid }), cache))
+      .resolves.toBeNull();
+  });
+
+  it("allows up to 60 seconds of clock skew for nbf while keeping exp strict", async () => {
+    const { cache } = certCache([firstKey.jwk]);
+    await expect(verify(await token({ claims: { nbf: NOW_SECONDS + 60 } }), cache))
+      .resolves.not.toBeNull();
+    await expect(verify(await token({ claims: { exp: NOW_SECONDS } }), cache))
       .resolves.toBeNull();
   });
 
@@ -147,7 +155,7 @@ describe("Cloudflare Access JWT verification", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
-  it("refreshes an expired cert set before selecting a reused kid", async () => {
+  it("clamps short cache headers to 60 seconds, then refreshes a reused kid", async () => {
     let now = NOW_MS;
     let next = 0;
     const rotatedJwk = { ...secondKey.jwk, kid: firstKey.kid };
@@ -159,6 +167,10 @@ describe("Cloudflare Access JWT verification", () => {
     await expect(verifyAccessJwtAssertion(await token(), accessEnv,
       { certCache: cache, now: () => now })).resolves.not.toBeNull();
     now += 1000;
+    await expect(verifyAccessJwtAssertion(await token(), accessEnv,
+      { certCache: cache, now: () => now })).resolves.not.toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    now += 59_000;
     await expect(verifyAccessJwtAssertion(
       await token({ key: secondKey, kid: firstKey.kid }), accessEnv,
       { certCache: cache, now: () => now })).resolves.not.toBeNull();
@@ -176,6 +188,32 @@ describe("Cloudflare Access JWT verification", () => {
     await expect(verifyCfAccessJwt(cookieOnly, accessEnv, { certCache: cache, now: () => NOW_MS }))
       .resolves.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("logs malformed Access configuration once but keeps token failures quiet", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { cache } = certCache([firstKey.jwk]);
+    const malformed = {
+      ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+      ACCESS_APP_AUD: accessEnv.ACCESS_APP_AUD,
+    };
+
+    await expect(verifyAccessJwtAssertion(await token(), malformed,
+      { certCache: cache, now: () => NOW_MS })).resolves.toBeNull();
+    await expect(verifyAccessJwtAssertion(await token(), malformed,
+      { certCache: cache, now: () => NOW_MS })).resolves.toBeNull();
+    expect(error).toHaveBeenCalledOnce();
+    expect(error.mock.calls[0][0]).toMatchObject({
+      component: "workshop.access",
+      event: "auth.access.configuration.invalid",
+      message: "invalid Cloudflare Access configuration",
+    });
+
+    error.mockClear();
+    await expect(verifyAccessJwtAssertion("not-a-jwt", accessEnv,
+      { certCache: cache, now: () => NOW_MS })).resolves.toBeNull();
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("fails closed when only one Access variable is configured", async () => {

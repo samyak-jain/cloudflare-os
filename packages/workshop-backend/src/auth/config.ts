@@ -6,6 +6,8 @@
 // "Continue with ..." button alongside the normal username/password form (unless password auth is
 // disabled). All OFF by default.
 
+import { hasAccessConfiguration } from "../access.js";
+
 /**
  * Parse the AUTH_GATEKEEPERS allowlist into a list of gatekeeper vendor ids (lowercased). These are
  * the gatekeepers permitted to drive sign-in; a vendor must also actually advertise `providesAuth`
@@ -23,11 +25,12 @@ export function hasAuthGatekeepers(env: Cloudflare.Env): boolean {
 }
 
 /**
- * Whether username/password login + signup is available. Enabled by default. An installation can
- * set DISABLE_PASSWORD_AUTH=true to be OAuth-only — but that only takes effect when at least one
- * auth gatekeeper is allowlisted, otherwise we'd lock everyone out, so password auth stays on.
+ * Whether username/password login + signup is available. Access deployments always disable it.
+ * Otherwise enabled by default; DISABLE_PASSWORD_AUTH=true takes effect only when at least one
+ * auth gatekeeper is allowlisted, so an incomplete OAuth-only setup cannot lock everyone out.
  */
 export function isPasswordAuthEnabled(env: Cloudflare.Env): boolean {
+  if (hasAccessConfiguration(env)) return false;
   if (env.DISABLE_PASSWORD_AUTH !== "true") return true;
   return !hasAuthGatekeepers(env);
 }
