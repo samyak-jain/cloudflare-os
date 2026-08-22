@@ -13,7 +13,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
-import { useServerConfig, useServerConfigError } from '../ServerConfigContext'
+import { useServerConfig } from '../ServerConfigContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -23,7 +23,6 @@ function RootComponent() {
   const rpcStub = useRpcStub()
   const connectionLost = useConnectionLost()
   const serverConfig = useServerConfig()
-  const serverConfigError = useServerConfigError()
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
@@ -34,7 +33,7 @@ function RootComponent() {
   // A standalone (no app shell) render is used only for signed-out visitors of public routes.
   // Signed-in users get the full app chrome so public pages (esp. the blueprint detail) feel
   // native — sidebar and all — instead of floating on a bare page.
-  const accessAuthEnabled = serverConfig?.accessAuthEnabled ?? (serverConfigError ? false : null)
+  const accessAuthEnabled = serverConfig?.accessAuthEnabled ?? null
   const standalone = !isAuthenticated && accessAuthEnabled === false && (isSignup || isBlueprint)
 
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept

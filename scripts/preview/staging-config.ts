@@ -369,7 +369,7 @@ function applyBackend(
   // every deployed backend (webFetch's toMarkdown conversion depends on it).
   config.ai = { binding: "WORKERS_AI" };
   config.services = backendGatekeeperServices(gatekeepers, baseUrl);
-  // The origin and password-auth kill switch are safe to print. ADMINS and the Cloudflare Access
+  // The origin and password-auth preference are safe to print. ADMINS and the Cloudflare Access
   // pair are uploaded as *secrets* instead, out of band, because Wrangler prints every plain-text
   // var's value in its deploy summary and this workflow's logs are public. See backendSecrets().
   config.vars = {

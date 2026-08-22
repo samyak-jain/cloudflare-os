@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AccessCertCache,
   accessRateLimitKey,
+  resetAccessConfigurationErrorsForTest,
   verifyAccessJwtAssertion,
   verifyCfAccessJwt,
 } from "../src/access.js";
@@ -36,6 +37,10 @@ beforeAll(async () => {
     };
   };
   [firstKey, secondKey] = await Promise.all([generate("key-1"), generate("key-2")]);
+});
+
+beforeEach(() => {
+  resetAccessConfigurationErrorsForTest();
 });
 
 function base64Url(value: string | ArrayBuffer): string {

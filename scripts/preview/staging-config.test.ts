@@ -244,12 +244,12 @@ test("no config names a resource belonging to another deployment", () => {
   }
 });
 
-test("the backend is told the router's origin and closes password auth", () => {
+test("the backend is told the router's origin and password-auth preference", () => {
   const { configs } = buildAll();
   const vars = previewsOf(configs, "workshop-backend").vars;
   assert.ok(vars, "the backend preview declares no vars");
 
-  // Both values are safe to print; admins and the Access pair are uploaded as secrets instead.
+  // Both values are safe to print; admins and the authoritative Access pair are secrets instead.
   assert.deepEqual(Object.keys(vars).toSorted(), ["DISABLE_PASSWORD_AUTH", "PUBLIC_BASE_URL"]);
   assert.equal(vars.DISABLE_PASSWORD_AUTH, "true");
   assert.equal(vars.PUBLIC_BASE_URL, BASE_URL);

@@ -17,9 +17,11 @@ does not fall back to password login or signup. Configuration errors are logged 
 isolate so an invalid deployment is loud without logging routine invalid tokens.
 
 No frontend build flag or separate asset build is needed. `getServerConfig()` tells the single
-frontend bundle whether to attempt Access. A stored app session keeps its existing fast path; with
-no stored session, Access is attempted only when the server reports it configured, so local and
-ordinary deployments add no guaranteed-failing authentication round trip.
+frontend bundle which identity source is authoritative. When Access is enabled, the client deletes
+any stored app-session token and authenticates only from the verified Access identity. When Access
+is explicitly disabled, the existing stored-session path remains and the client makes no
+guaranteed-failing Access round trip. An unavailable configuration fails closed after a bounded
+wait rather than trying either identity source indefinitely.
 
 Access authentication uses the existing `/api` Cap'n Web connection. Before either a WebSocket or
 HTTP-batch RPC session is constructed, the handler verifies the assertion and exact browser origin.
@@ -28,8 +30,10 @@ HTTP-batch RPC session is constructed, the handler verifies the assertion and ex
 methods. It does not mint a permanent app-session row on each reconnect. Password login and signup
 RPCs remain disabled whenever Access is configured.
 
-Preview deployments also set `DISABLE_PASSWORD_AUTH=true` as a plain-text defense-in-depth var. The
-backend's Access hard gate is authoritative even if that variable is omitted.
+Preview deployments also set `DISABLE_PASSWORD_AUTH=true` as a plain-text configuration preference.
+It is not an independent safety control: without an allowlisted auth gatekeeper, the auth config
+intentionally ignores it to avoid lockout. The configured Access hard gate is the authoritative
+boundary that closes password login and signup.
 
 `/api/hermes/wake` is dispatched before `/api` RPC setup and remains protected only by its existing
 bearer token. It does not require or consume a Cloudflare Access assertion, matching the separate

@@ -42,6 +42,11 @@ const TEAM_DOMAIN_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudfl
 const logger = createWorkshopLogger("workshop.access");
 const loggedConfigurationErrors = new Set<string>();
 
+/** Clears isolate-local log de-duplication so verification tests do not depend on execution order. */
+export function resetAccessConfigurationErrorsForTest(): void {
+  loggedConfigurationErrors.clear();
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
