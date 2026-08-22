@@ -1305,7 +1305,15 @@ function validateStateShape(
   }
 }
 
-/** Validate one whole-state mirror against the bindings in a previously validated tree. */
+/**
+ * Validate one whole-state mirror against the bindings in a previously validated tree.
+ *
+ * LOAD-BEARING SECURITY INVARIANT: state-shape validation is bidirectional. Every computed
+ * `bind()` path must resolve to an existing declared state leaf, and every state leaf must be
+ * referenced by a `bind()` path in the validated tree. Computed paths are safe only while both
+ * directions hold. Do not relax this to allow unreferenced `state` keys without security
+ * re-review: doing so would silently turn computed bind paths into attacker-chosen dot paths.
+ */
 export function validateRenderUIState(
     tree: GenerativeUiNode, state: Record<string, unknown>): void {
   if (!isPlainRecord(state)) throw new Error("renderUI state must be a JSON object.");

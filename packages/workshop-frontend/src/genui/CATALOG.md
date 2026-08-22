@@ -27,6 +27,11 @@ Conventions used throughout:
   numbers and concatenates when either operand is a string. Use a template for mixed row labels:
   `` `#${index + 1}` `` is `"#1"`, while `"#" + index + 1` follows left associativity and is
   `"#01"` for index zero.
+- **Guard division and modulo.** Division or modulo by zero, and any other non-finite arithmetic
+  result, rejects the whole card. Use a ternary guard such as `qty > 0 ? total / qty : 0`.
+- **Floating-point formatting is raw.** For example, `0.1 + 0.2` produces
+  `0.30000000000000004`. Pre-round money and currency values in `data` instead of computing them
+  in the expression language.
 - **Everything else is rejected structurally in every branch.** That includes imports, ordinary
   or member calls, arrows outside direct `.map`, block-bodied callbacks, declarations, loops,
   assignments, updates, `new`, spreads, tagged templates, sequence expressions, optional access,
