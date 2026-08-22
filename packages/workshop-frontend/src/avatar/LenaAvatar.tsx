@@ -13,51 +13,58 @@
  * cross-dissolve read as Lena moving rather than as two pictures swapping -- the only things that
  * actually change across the dissolve are the parts the art changed.
  *
- * ## Motion
+ * ## Why nothing moves while a state holds
  *
- * Everything that moves here is a CSS animation on a `transform` or an `opacity`, so it runs on
- * the compositor and costs no main-thread time at all: no rAF loop, no per-frame attribute writes,
- * nothing for React to re-render. (v1's rAF renderer measured 0.69 % of a main thread at idle,
- * almost all of it rasterizing the SVG. A composited transform on an already-decoded 384 px raster
- * is well under that.) The browser also throttles these on its own while the tab is hidden.
+ * The first v2 cut carried two ambient CSS animations: a ~4.6 s breathing `scale` and a ~1.1 deg
+ * head-tilt `rotate` every ~11 s. Both were compositor-only and cost no main-thread time, and both
+ * had to go, because "costs no CPU" is not the same as "costs nothing".
  *
- * Two layers of life, both chosen because they work on a *static* frame -- no blink, because the
- * art has open eyes baked in and faking one would need a second frame per state:
+ * A baked portrait is a *raster*. Any transform other than an identity one resamples it, and the
+ * art arrives at 384 px to be drawn at 72, so the resample is a 5x downscale with real detail to
+ * lose. Measured in Chromium on the QA harness at the 96 px the header used to ask for, so the
+ * numbers are against the build that shipped:
  *
- * - **Breathing.** A ~4.6 s scale oscillation of well under a pixel at 96 px. Invisible when you
- *   look at it and unmistakable when it stops.
- * - **The bob.** A slow head-tilt every ~11 s, at rest for most of the cycle. A continuous bob
- *   reads as a bouncing GIF; one that mostly sits still reads as someone sitting there.
+ * | | high-frequency energy | per-frame edge motion (p99, 33 ms) |
+ * | --- | --- | --- |
+ * | at rest | 7619, identical on every sample | 0 |
+ * | breathing | -- | 6 luma levels, forever |
+ * | mid head-tilt | 7067 (**-7 %**), ramping over ~3 s | 38 luma levels |
  *
- * Both are shaped so they can never uncover the backdrop inside the circle crop, which is why the
- * bob is a rotation and not a translation. The distance from a square's centre to each of its edges
- * does not change when it rotates, so a square rotated about its centre always still contains its
- * own inscribed circle -- whereas any translation slides an edge across the crop and exposes a
- * crescent of background. For the same reason `breathe` scales from the *top* edge (`50% 0%`): it
- * grows down and outward and never lifts the top of the head into the crop. `BOB_MARGIN` covers the
- * four points where a pure rotation is exactly tangent to the circle.
+ * So the tilt softened the whole frame for three seconds out of every eleven and then sharpened it
+ * back, and the breath kept every edge in the picture crawling sub-pixel the entire time it was on
+ * screen. Together that is what an operator reported as "a lot of blurring and glitching". The
+ * breath's amplitude was also mis-described as sub-pixel: `scale(1.018)` about a top-edge origin
+ * moves the *bottom* of a 96 px frame by ~1.7 px.
  *
- * Under `prefers-reduced-motion: reduce` both stop and the crossfade becomes a cut.
+ * Neither could be rescued by tuning. A rotation resamples every pixel at any non-zero angle, and a
+ * continuous scale or translate passes through fractional device-pixel offsets whatever its
+ * amplitude. So the portrait now carries no transform at all: it is rasterized once, composited
+ * 1:1, and stays bit-identical for as long as the state holds. Life comes from the state changes
+ * themselves and from the status pill beside her, which are the moments that mean something anyway.
+ *
+ * `prefers-reduced-motion: reduce` turns the dissolve into a cut, following the OS setting live.
  */
 
 import { useEffect, useRef, useState } from "react";
 import type { AvatarPortraitKey } from "./portraits";
 import { describeAvatarState, type AvatarStateSnapshot } from "./state";
 
-/** Crossfade duration. Long enough to read as a dissolve, short enough to keep the UI responsive. */
-const CROSSFADE_MS = 260;
-
-/** Breathing period (one direction; the animation alternates, so a full breath is twice this). */
-const BREATHE_S = 4.6;
-
-/** Bob period. Most of it is the rest hold in the keyframes below. */
-const BOB_S = 11;
-
 /**
- * Uniform scale carried by the bob, so a rotation that is exactly tangent to the circle crop
- * cannot leave an antialiased hairline of backdrop at the four tangent points.
+ * Crossfade duration.
+ *
+ * Every frame in the set is opaque and covers the crop, so at dissolve progress `p` the screen
+ * shows `p x incoming + (1-p) x outgoing` -- a true cross-dissolve with no dip to the backdrop. The
+ * cost is that while `p` is near 0.5 the two *poses* double-expose: idle -> thinking shows a
+ * translucent phantom arm, talking -> error a doubled pair of fists. That is the other half of the
+ * "glitching" report, and unlike the ambient motion it is inherent to dissolving between poses.
+ *
+ * It can only be made shorter and steeper. 180 ms with a symmetric ease that whips through the
+ * middle leaves 24 ms inside the worst band (opacity 0.25-0.75), against 63 ms for the 260 ms
+ * `cubic-bezier(0.33, 0, 0.2, 1)` this replaces -- a 2.6x cut -- while the eased ends keep it from
+ * reading as a hard cut.
  */
-const BOB_MARGIN = 1.006;
+const CROSSFADE_MS = 180;
+const CROSSFADE_EASE = "cubic-bezier(0.8, 0, 0.2, 1)";
 
 /**
  * Cap on stacked crossfade layers.
@@ -83,21 +90,14 @@ const BACKDROP =
 const MOTION_STYLE_ID = "lena-avatar-motion";
 
 /**
- * The keyframes, injected once into `document.head`.
+ * The one keyframe, injected once into `document.head`.
  *
  * A `<style>` element rather than a stylesheet import because the QA harness page loads no CSS at
- * all, and an avatar that only breathes inside the app is an avatar whose motion never gets
+ * all, and a dissolve that only runs inside the app is a dissolve whose timing never gets
  * reviewed. Inline styles cannot express `@keyframes`, so this is the cheap way to have both.
  */
 const MOTION_KEYFRAMES = `
 @keyframes lena-portrait-in { from { opacity: 0 } to { opacity: 1 } }
-@keyframes lena-breathe { from { transform: scale(1) } to { transform: scale(1.018) } }
-@keyframes lena-bob {
-  0%, 58% { transform: scale(${BOB_MARGIN}) rotate(0deg) }
-  73% { transform: scale(${BOB_MARGIN}) rotate(-1.1deg) }
-  87% { transform: scale(${BOB_MARGIN}) rotate(0.3deg) }
-  100% { transform: scale(${BOB_MARGIN}) rotate(0deg) }
-}
 `;
 
 function ensureMotionKeyframes(): void {
@@ -134,7 +134,7 @@ export type LenaAvatarProps = {
   snapshot: AvatarStateSnapshot;
   /**
    * Rendered diameter in CSS pixels. The art is vendored at 384 px, so anything up to 384 is
-   * sharp on a 1x display and up to 192 on a 2x one; the chat header asks for 96.
+   * sharp on a 1x display and up to 128 on a 3x one; the presence bubble asks for 72.
    */
   size?: number;
   className?: string;
@@ -143,7 +143,7 @@ export type LenaAvatarProps = {
 };
 
 export default function LenaAvatar(
-  { snapshot, size = 96, className = "", reducedMotion }: LenaAvatarProps,
+  { snapshot, size = 72, className = "", reducedMotion }: LenaAvatarProps,
 ) {
   const [art, setArt] = useState<ArtModule | null>(null);
   const [layers, setLayers] = useState<PortraitLayer[]>([]);
@@ -199,7 +199,6 @@ export default function LenaAvatar(
   };
 
   const label = `Lena — ${describeAvatarState(snapshot.state)}`;
-  const motion = still ? undefined : "transform";
 
   return (
     <div
@@ -207,12 +206,17 @@ export default function LenaAvatar(
       // The circle crop is inline rather than a utility class: the QA harness page loads no
       // stylesheet, and a square Lena is a visibly different design, not a degraded one.
       style={{
+        // `position` inline as well as in the class list: the stacked frames are absolutely
+        // positioned, and on the QA harness page -- which loads no stylesheet at all -- Tailwind's
+        // `relative` does not exist, so they would escape to the viewport and the crop would show a
+        // window onto a full-screen Lena.
+        position: "relative",
         width: size,
         height: size,
         background: BACKDROP,
         borderRadius: "50%",
         overflow: "hidden",
-        // Safari otherwise paints the composited layers below over the rounded corners.
+        // Safari otherwise paints the stacked layers below over the rounded corners.
         isolation: "isolate",
       }}
       role="img"
@@ -223,54 +227,28 @@ export default function LenaAvatar(
       data-avatar-portrait={portrait ?? undefined}
       data-avatar-still={still ? "true" : undefined}
     >
-      {/* Bob outside breathe: two animations, both on `transform`, so they cannot share a node. */}
-      <div
-        aria-hidden
-        data-avatar-motion="bob"
-        style={{
-          width: "100%",
-          height: "100%",
-          willChange: motion,
-          animation: still ? undefined : `${BOB_S}s lena-bob ease-in-out infinite`,
-        }}
-      >
-        <div
-          data-avatar-motion="breathe"
+      {layers.map((layer) => (
+        <img
+          key={layer.id}
+          src={layer.src}
+          alt=""
+          draggable={false}
+          data-avatar-layer={layer.portrait}
+          onAnimationEnd={() => onLayerShown(layer.id)}
           style={{
-            position: "relative",
+            position: "absolute",
+            inset: 0,
             width: "100%",
             height: "100%",
-            willChange: motion,
-            transformOrigin: "50% 0%",
+            objectFit: "cover",
+            // The filter belongs to the frame, so it dissolves in and out with it.
+            filter: art?.AVATAR_PORTRAIT_FILTERS[layer.portrait],
             animation: still
               ? undefined
-              : `${BREATHE_S}s lena-breathe ease-in-out infinite alternate`,
+              : `${CROSSFADE_MS}ms lena-portrait-in ${CROSSFADE_EASE} both`,
           }}
-        >
-          {layers.map((layer) => (
-            <img
-              key={layer.id}
-              src={layer.src}
-              alt=""
-              draggable={false}
-              data-avatar-layer={layer.portrait}
-              onAnimationEnd={() => onLayerShown(layer.id)}
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                // The filter belongs to the frame, so it dissolves in and out with it.
-                filter: art?.AVATAR_PORTRAIT_FILTERS[layer.portrait],
-                animation: still
-                  ? undefined
-                  : `${CROSSFADE_MS}ms lena-portrait-in cubic-bezier(0.33, 0, 0.2, 1) both`,
-              }}
-            />
-          ))}
-        </div>
-      </div>
+        />
+      ))}
     </div>
   );
 }

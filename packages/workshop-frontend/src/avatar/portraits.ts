@@ -5,8 +5,8 @@
  * through a dynamic `import()` from `LenaAvatar.tsx`, which is what keeps the eleven asset URLs --
  * and, more importantly, the ~310 KB of WebP they point at -- out of the initial bundle.
  *
- * The art is vendored under `art/` as 384 px WebP (4x the 96 px header size, so the header stays
- * sharp on a 2x display and has headroom for a larger surface later). The 1024 px PNG masters are
+ * The art is vendored under `art/` as 384 px WebP (5.3x the 72 px presence bubble, so it stays sharp
+ * past a 3x phone display and has headroom for a larger surface later). The 1024 px PNG masters are
  * deliberately *not* in the repo; see `../README.md` for the regeneration path.
  */
 

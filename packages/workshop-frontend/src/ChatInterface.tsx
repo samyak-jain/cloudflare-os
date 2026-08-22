@@ -88,7 +88,7 @@ import {
   isWorkshopToolName,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { AvatarController, ChatAvatar, ChatAvatarStatus } from "./avatar";
+import { AvatarController, ChatPresence } from "./avatar";
 import { useServerConfig } from "./ServerConfigContext";
 import {
   ComposingUiCard,
@@ -5096,9 +5096,19 @@ function ChatInterface({
   const avatarController = avatarControllerRef.current;
   useEffect(() => () => avatarControllerRef.current?.destroy(), []);
 
-  // Deployment feature flag (FEATURE_CHAT_AVATAR). When off, the chat headers keep their original
-  // pre-avatar height; the controller still runs so flipping the flag needs no other changes.
+  // Deployment feature flag (FEATURE_CHAT_AVATAR). When off, no presence bubble is mounted; the
+  // controller still runs, so flipping the flag needs no other changes. The chat headers have no
+  // avatar-dependent geometry any more -- see ChatPresence.
   const chatAvatarEnabled = useServerConfig()?.chatAvatarEnabled ?? false;
+
+  // Room at the end of the transcript for whatever floats over its bottom-right corner. The
+  // transcript is pinned to the bottom in the common case, so this is what keeps the newest message
+  // out from under the presence bubble; scrolled up she does overlap, which is the deal a floating
+  // element makes. The two contributors stack: `ChatPresence` lifts itself over the captured-log
+  // chip by the same amount the chip alone asks for.
+  const transcriptBottomPadding = chatAvatarEnabled
+    ? (pendingConsoleLogCount > 0 ? "pb-32" : "pb-24")
+    : (pendingConsoleLogCount > 0 ? "pb-16" : "pb-8");
 
   // Follow the viewed chat, so a previous conversation's tail never bleeds into a new one.
   useEffect(() => {
@@ -7397,23 +7407,11 @@ function ChatInterface({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
           {sidebarMode && (
-            <div
-              className={`flex ${chatAvatarEnabled ? "h-[104px]" : "h-12"} flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4`}
-            >
-              {/* Same avatar, same controller; in sidebar mode this bar is the chat's only chrome. */}
-              {chatAvatarEnabled && (
-                <>
-                  <ChatAvatar controller={avatarController} size={96} />
-                  <ChatAvatarStatus
-                    controller={avatarController}
-                    className="mb-4 self-end truncate text-[11px] leading-4 text-kumo-inactive"
-                  />
-                </>
-              )}
+            <div className="flex h-12 flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
               <button
                 type="button"
                 onClick={() => setSidebarActiveTab("chat")}
-                className={`relative flex h-12 cursor-pointer items-center self-end text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
+                className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "chat"
                     ? "font-medium text-kumo-default after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-kumo-contrast/70"
                     : "font-normal text-kumo-subtle hover:text-kumo-default"
@@ -7424,7 +7422,7 @@ function ChatInterface({
               <button
                 type="button"
                 onClick={() => setSidebarActiveTab("connections")}
-                className={`relative flex h-12 cursor-pointer items-center self-end text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
+                className={`relative flex h-full cursor-pointer items-center text-[13px] leading-[18px] tracking-[-0.25px] transition-colors ${
                   sidebarActiveTab === "connections"
                     ? "font-medium text-kumo-default after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-kumo-contrast/70"
                     : "font-normal text-kumo-subtle hover:text-kumo-default"
@@ -7447,9 +7445,7 @@ function ChatInterface({
             <>
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
               {!sidebarMode && (
-                <div
-                  className={`flex ${chatAvatarEnabled ? "h-[104px]" : "h-12"} flex-shrink-0 items-center justify-between gap-3 border-b border-kumo-line px-4`}
-                >
+                <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
                   <WorkshopIconButton
                     onClick={() => onNavigateToChat(null)}
                     className="!h-8 !w-8 flex-shrink-0"
@@ -7458,14 +7454,6 @@ function ChatInterface({
                   >
                     <CaretLeft size={14} />
                   </WorkshopIconButton>
-
-                  {/*
-                    Lena. A view of the turn stream, sized at the 96 px RIG.md §5 calls "still
-                    comfortable" -- the smallest at which the mouth still reads as a shape.
-                  */}
-                  {chatAvatarEnabled && (
-                    <ChatAvatar controller={avatarController} size={96} />
-                  )}
 
                   {isEditingTitle ? (
                     <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -7499,21 +7487,9 @@ function ChatInterface({
                     </div>
                   ) : (
                     <>
-                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                        <span className="min-w-0 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
-                          {currentChatMetadata?.title || "Chat"}
-                        </span>
-                        {/*
-                          What the avatar is showing, in words. Subscribes on its own so a turn's
-                          state changes never re-render this component -- see ChatAvatarStatus.
-                        */}
-                        {chatAvatarEnabled && (
-                          <ChatAvatarStatus
-                            controller={avatarController}
-                            className="truncate text-[11px] leading-4 text-kumo-inactive"
-                          />
-                        )}
-                      </div>
+                      <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                        {currentChatMetadata?.title || "Chat"}
+                      </span>
                       <WorkshopIconButton
                         onClick={() => setIsEditingTitle(true)}
                         className="!h-8 !w-8 flex-shrink-0 text-kumo-inactive hover:text-kumo-subtle"
@@ -7549,7 +7525,7 @@ function ChatInterface({
                   </div>
                 ) : (
                   <div
-                    className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${pendingConsoleLogCount > 0 ? "pb-16" : "pb-8"} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
+                    className={`flex flex-col px-3 pt-5 sm:px-6 sm:pt-8 ${transcriptBottomPadding} ${useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}`}
                   >
                     {isLoadingEarlier && (
                       <div className="mx-auto mb-6 text-[12px] leading-4 font-medium text-kumo-inactive">
@@ -8382,7 +8358,21 @@ function ChatInterface({
               </div>
 
               {/* ── Bottom: input, update state, and cost ──────────────── */}
-              <div className={`flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
+              <div className={`relative flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
+                {/*
+                  Lena floats directly above the composer, hung off its top edge. Anchoring her here
+                  rather than inside the scroller is what guarantees the two properties the header
+                  placement could not have at once: she is over the transcript (so she costs no
+                  layout) but strictly outside the composer (so she can never cover it), and she
+                  does not scroll away with the messages.
+                */}
+                {chatAvatarEnabled && (
+                  <ChatPresence
+                    controller={avatarController}
+                    raised={pendingConsoleLogCount > 0}
+                    scrollerRef={messagesContainerRef}
+                  />
+                )}
                 <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
                   {/* Remount all transient composer state when the conversation changes. */}
                   <ChatInput
