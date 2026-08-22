@@ -68,7 +68,7 @@ export function describeAvatarState(state: AvatarState): string {
 }
 
 /**
- * The caption shown beside the avatar in the chat header.
+ * The caption shown beside the avatar, as the presence bubble's status pill.
  *
  * Says what is happening rather than naming the state: the avatar is the glanceable signal and
  * this is the sentence for when a glance is not enough. It is also the only place the four

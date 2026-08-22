@@ -136,14 +136,34 @@ describe("LenaAvatar", () => {
     expect(frames().at(-1)!.style.filter).toBe("");
   });
 
-  it("breathes and bobs on compositor-only transforms", async () => {
+  // The v2.1 fix for "a lot of blurring and glitching": a baked portrait is a raster, and the
+  // ambient breathe/bob transforms resampled it continuously. Nothing may transform a frame.
+  it("never transforms a frame, so the raster is composited untouched", async () => {
     await render({ snapshot: snapshot({ kind: "idle" }) });
-    const bob = container.querySelector<HTMLElement>('[data-avatar-motion="bob"]')!;
-    const breathe = container.querySelector<HTMLElement>('[data-avatar-motion="breathe"]')!;
-    expect(bob.style.animation).toContain("lena-bob");
-    expect(breathe.style.animation).toContain("lena-breathe");
-    expect(document.getElementById("lena-avatar-motion")?.textContent)
-      .toContain("@keyframes lena-breathe");
+    expect(container.querySelectorAll("[data-avatar-motion]")).toHaveLength(0);
+
+    const keyframes = document.getElementById("lena-avatar-motion")?.textContent ?? "";
+    expect(keyframes).toContain("@keyframes lena-portrait-in");
+    expect(keyframes).not.toContain("lena-breathe");
+    expect(keyframes).not.toContain("lena-bob");
+
+    for (const element of [container.firstElementChild!, ...frames()]) {
+      const style = (element as HTMLElement).style;
+      expect(style.transform).toBe("");
+      expect(style.willChange).toBe("");
+    }
+  });
+
+  it("dissolves fast enough that the two poses barely double-expose", async () => {
+    await render({ snapshot: snapshot({ kind: "idle" }) });
+    await finishFade();
+    await render({ snapshot: snapshot({ kind: "thinking" }, 1) });
+
+    const animation = frames().at(-1)!.style.animation;
+    expect(animation).toContain("180ms");
+    // Symmetric and steep through the middle: it is the time spent near opacity 0.5, not the
+    // duration, that shows a phantom arm.
+    expect(animation).toContain("cubic-bezier(0.8, 0, 0.2, 1)");
   });
 
   describe("under prefers-reduced-motion", () => {
@@ -153,11 +173,6 @@ describe("LenaAvatar", () => {
       await render({ snapshot: snapshot({ kind: "idle" }) });
       const host = container.firstElementChild as HTMLElement;
       expect(host.dataset.avatarStill).toBe("true");
-      expect(container.querySelector<HTMLElement>('[data-avatar-motion="bob"]')!.style.animation)
-        .toBe("");
-      expect(
-        container.querySelector<HTMLElement>('[data-avatar-motion="breathe"]')!.style.animation,
-      ).toBe("");
       expect(frames()[0]!.style.animation).toBe("");
 
       await render({ snapshot: snapshot({ kind: "error" }, 1) });

@@ -10,7 +10,7 @@ workspace, alongside the prompts and the fal driver that produced them:
         NOTES.md        model, prompt pattern, per-state caveats, the honest weaknesses
         work/           the fal driver and the prompt scripts
 
-What is vendored here is the shipping encode: 384 px WebP q88, which is 4x the 96 px chat header
+What is vendored here is the shipping encode: 384 px WebP q88, which is 5.3x the 72 px presence bubble
 and lands at ~28 KB a frame (~310 KB for the set).
 
     python3 src/avatar/art/build-art.py                     # re-encode + rebuild the sheet
@@ -18,7 +18,7 @@ and lands at ~28 KB a frame (~310 KB for the set).
     python3 src/avatar/art/build-art.py --sheet-only        # sheet from the vendored WebP
 
 The realistic track sits next door at `v2-bakeoff/realistic/` and is *banked, not wired*: same 11
-states, same pipeline, chosen against for the 96 px header because the detail does not survive the
+states, same pipeline, chosen against at chat size because the detail does not survive the
 downscale. Point `--src` at it if a larger avatar surface ever exists.
 
 Requires Pillow (`pip install pillow`). Nothing in the build or the test suite runs this; it is a
@@ -91,7 +91,7 @@ def apply_runtime_filter(image: Image.Image, state: str) -> Image.Image:
 
 
 def circle_crop(image: Image.Image, px: int) -> Image.Image:
-    """The chat header's crop: the frame's inscribed circle, on a transparent square."""
+    """The presence bubble's crop: the frame's inscribed circle, on a transparent square."""
     frame = image.resize((px, px), Image.LANCZOS).convert("RGBA")
     mask = Image.new("L", (px * 4, px * 4), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, px * 4 - 1, px * 4 - 1), fill=255)
@@ -155,7 +155,7 @@ def build_sheet() -> None:
     strip_y = head + grid_h + 34
     draw.text(
         (pad, strip_y),
-        f"{strip_px} px — the chat header's actual size",
+        f"{strip_px} px — around the size Lena is actually drawn at",
         font=font(12),
         fill="#6d6580",
     )

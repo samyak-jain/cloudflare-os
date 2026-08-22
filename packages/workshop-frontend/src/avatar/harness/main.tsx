@@ -10,10 +10,11 @@
  * into a real `AvatarController`. A harness that force-set the state would screenshot poses the
  * event stream might never actually produce.
  *
- * The v2 renderer is a crossfade, so the *transitions* matter as much as the endpoints: hence the
- * scripted turn (a realistic event sequence) and the cycle button (every state in turn, paced so a
- * dissolve is watchable). The reduced-motion column beside the live stage is the only place the
- * `prefers-reduced-motion` path gets looked at without changing an OS setting.
+ * The v2 renderer is a crossfade, so the *transitions* matter as much as the endpoints -- and since
+ * v2.1 they are the *only* thing that moves, the frames themselves never being transformed. Hence
+ * the scripted turn (a realistic event sequence) and the cycle button (every state in turn, paced
+ * so a dissolve is watchable). The reduced-motion column beside the live stage is the only place
+ * the `prefers-reduced-motion` path gets looked at without changing an OS setting.
  *
  * `window.__avatar` is the Playwright-facing API; see `../README.md` for how it is driven.
  */
@@ -252,7 +253,7 @@ function Harness() {
       </div>
 
       <div id="avatar-stage" style={{ display: "flex", alignItems: "flex-end", gap: 32, marginBottom: 8 }}>
-        {[140, 96, 64].map((size) => (
+        {[120, 72, 56].map((size) => (
           <figure key={size} style={{ margin: 0, textAlign: "center" }}>
             <ChatAvatar controller={controller} size={size} />
             <figcaption style={{ marginTop: 8, ...muted }}>{size}px</figcaption>
@@ -267,8 +268,8 @@ function Harness() {
             beside the normal one rather than only when someone changes an OS setting. `reducedMotion`
             is a QA-only override on the renderer; `ChatAvatar` has no such prop.
           */}
-          <LenaAvatar snapshot={snapshot} size={96} reducedMotion />
-          <figcaption style={{ marginTop: 8, ...muted }}>96px · reduced motion</figcaption>
+          <LenaAvatar snapshot={snapshot} size={72} reducedMotion />
+          <figcaption style={{ marginTop: 8, ...muted }}>72px · reduced motion</figcaption>
         </figure>
       </div>
 
@@ -283,14 +284,14 @@ function Harness() {
         <p style={{ margin: "0 0 14px" }}>
           <strong>Art sheet</strong>
           <span style={{ opacity: 0.6 }}>
-            {"  —  every frame at header size, force-set. Not through the mapping: this checks the "}
+            {"  —  every frame at bubble size, force-set. Not through the mapping: this checks the "}
             {"art, not the state machine."}
           </span>
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
           {ART_SHEET.map(({ label, state }) => (
-            <figure key={label} style={{ margin: 0, textAlign: "center", width: 96 }}>
-              <LenaAvatar snapshot={{ state, since: 0 }} size={96} />
+            <figure key={label} style={{ margin: 0, textAlign: "center", width: 72 }}>
+              <LenaAvatar snapshot={{ state, since: 0 }} size={72} />
               <figcaption style={{ marginTop: 6, ...muted }}>{label}</figcaption>
             </figure>
           ))}

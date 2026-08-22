@@ -7,8 +7,9 @@
  *   `mapping.ts`    `AiChatStreamEvent` + turn boundaries -> `AvatarState`, with hysteresis
  *   `controller.ts` the sink the existing chat subscriber feeds; publishes snapshots
  *   `portraits.ts`  the art table: `AvatarState` -> one of eleven baked frames
- *   `LenaAvatar`    cross-dissolves between frames, plus compositor-only breathing and bob
- *   `ChatAvatar`    binds a controller to `LenaAvatar`
+ *   `LenaAvatar`    cross-dissolves between frames; the frames themselves never move
+ *   `ChatAvatar`    binds a controller to `LenaAvatar`, plus the status caption
+ *   `ChatPresence`  the floating bubble the chat actually mounts: avatar + status pill + tuck
  *
  * Art is vendored under `art/` as 384 px WebP, baked from the chibi track of the v2 bake-off.
  * `python3 art/build-art.py` re-vendors it from the masters and rebuilds the contact sheet.
@@ -20,4 +21,5 @@ export type { AvatarMessageInput, AvatarTimings } from "./mapping";
 export { avatarStatusLabel, describeAvatarState, sameAvatarState } from "./state";
 export type { AvatarState, AvatarStateKind, AvatarStateSnapshot, AvatarWorkKind } from "./state";
 export { default as ChatAvatar, ChatAvatarStatus } from "./ChatAvatar";
+export { default as ChatPresence } from "./ChatPresence";
 export { default as LenaAvatar } from "./LenaAvatar";
