@@ -13,6 +13,10 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import {
+  generateSubscriptionTitle, type SubscriptionTokenState,
+} from './chatgpt-subscription.js';
+import { isSubscriptionNamingEnabled } from './deployment-config.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -40,6 +44,10 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // exactly once per blueprint: an admin who then removes a format keeps it removed, while a
       // deployment that installed before curation existed still gets promoted.
       promotedFormatBlueprints: <string[]>[],
+
+      // Rotating ChatGPT OAuth state. This singleton is the one refresh authority for every
+      // workspace, avoiding concurrent use of a one-time refresh token.
+      subscriptionTokenState: <SubscriptionTokenState | undefined>undefined,
     },
   });
 }
@@ -66,6 +74,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // R2 and config are separate stores. Serialize logo changes so reset/upload operations cannot
   // interleave while switching whether the fixed public object is enabled.
   private siteLogoMutationTail = Promise.resolve();
+  private subscriptionNamingTail = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -73,6 +82,26 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+  }
+
+  /** Generate one title through the configured ChatGPT subscription, serialized for token safety. */
+  generateSubscriptionTitle(prompt: string): Promise<string | undefined> {
+    if (!isSubscriptionNamingEnabled(this.env)) return Promise.resolve(undefined);
+    const operation = this.subscriptionNamingTail.then(async () => {
+      try {
+        return await generateSubscriptionTitle(
+          this.env,
+          prompt,
+          this.storage.subscriptionTokenState.get(),
+          state => this.storage.subscriptionTokenState.put(state),
+        );
+      } catch {
+        // The provider emitted the bounded structured event. Naming is deliberately fail-soft.
+        return undefined;
+      }
+    });
+    this.subscriptionNamingTail = operation.then(() => undefined, () => undefined);
+    return operation;
   }
 
   /**
