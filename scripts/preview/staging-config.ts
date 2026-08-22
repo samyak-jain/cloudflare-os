@@ -520,8 +520,8 @@ export function resolveTarget({
 export interface AccessConfig {
   /** The application's audience tag, matched as the JWT's `aud`. */
   aud: string;
-  /** Team domain that issued the JWT, e.g. `https://<team>.cloudflareaccess.com`. */
-  iss: string;
+  /** Team hostname that issued the JWT, e.g. `<team>.cloudflareaccess.com`. */
+  teamDomain: string;
 }
 
 /**
@@ -537,19 +537,26 @@ export interface AccessConfig {
  * env-passthrough.test.js, whose discovery is textual, can see both names.
  */
 export function resolveAccess({
-  aud = process.env.CF_ACCESS_AUD,
-  iss = process.env.CF_ACCESS_ISS,
-}: { aud?: string; iss?: string } = {}): AccessConfig {
-  if (!aud || !iss) {
+  aud = process.env.ACCESS_APP_AUD,
+  teamDomain = process.env.ACCESS_TEAM_DOMAIN,
+}: { aud?: string; teamDomain?: string } = {}): AccessConfig {
+  aud = aud?.trim();
+  teamDomain = teamDomain?.trim().toLowerCase();
+  if (!aud || !teamDomain) {
     const missing = [
-      ...(aud ? [] : ["CF_ACCESS_AUD"]),
-      ...(iss ? [] : ["CF_ACCESS_ISS"]),
+      ...(aud ? [] : ["ACCESS_APP_AUD"]),
+      ...(teamDomain ? [] : ["ACCESS_TEAM_DOMAIN"]),
     ];
     throw new Error(`${missing.join(" and ")} must be set: together they name the Cloudflare ` +
         "Access application that authenticates a preview, and a preview deployed without it " +
         "would fall back to password signup on a public URL");
   }
-  return { aud, iss };
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudflareaccess\.com$/.test(
+      teamDomain)) {
+    throw new Error("ACCESS_TEAM_DOMAIN must be a cloudflareaccess.com hostname without a " +
+        "scheme or path");
+  }
+  return { aud, teamDomain };
 }
 
 /**
@@ -647,8 +654,8 @@ export function resolveAiGateway({
  * uploads these over stdin instead, with `wrangler preview secret bulk`, which prints names and
  * `********`.
  *
- * Setting the Access pair is also what closes the password path — the backend's `login()` and
- * `createAccount()` both throw once CF_ACCESS_AUD is set — so DISABLE_PASSWORD_AUTH is not needed.
+ * Access bootstrap is additive to the normal login fallback, so previews do not need a separate
+ * frontend build or password-auth variable.
  */
 export function backendSecrets({
   admins = resolveAdmins(),
@@ -664,8 +671,8 @@ export function backendSecrets({
     // form: ".env doesn't actually let you specify JSON bindings, so we also support a string that
     // parses as JSON array".
     ADMINS: JSON.stringify(admins),
-    CF_ACCESS_AUD: access.aud,
-    CF_ACCESS_ISS: access.iss,
+    ACCESS_APP_AUD: access.aud,
+    ACCESS_TEAM_DOMAIN: access.teamDomain,
     // The gateway name and its account are not secret in the way the token is, but they travel the
     // same way rather than as vars: one mechanism, and nothing about the deployment in the log.
     ...aiGateway,
