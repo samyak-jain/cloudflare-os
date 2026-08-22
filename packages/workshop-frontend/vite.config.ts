@@ -18,9 +18,9 @@ const runConfig = {
       /**
        * `build` is a task rather than a package.json script so `env` can declare the `VITE_*` flags
        * it reads: a cached `vp` run executes scripts in a clean environment, and the values would be
-       * missing from the fingerprint besides. `VITE_CF_ACCESS_MODE` is inlined into the bundle
-       * (`src/useAuth.ts`) and `VITE_FRONTEND_ERROR_REPORTING` selects hidden source maps below, so
-       * replaying a bundle built under different values is wrong rather than merely stale.
+       * missing from the fingerprint besides. `VITE_FRONTEND_ERROR_REPORTING` selects hidden
+       * source maps below, so replaying a bundle built under a different value is wrong rather
+       * than merely stale.
        *
        * Separate commands rather than one `&&` string so each is a cache entry of its own; `env` is
        * task-wide, so changing a flag re-runs all three anyway. `tsconfig.vite.json` is the

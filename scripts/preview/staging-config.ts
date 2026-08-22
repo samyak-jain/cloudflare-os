@@ -369,12 +369,12 @@ function applyBackend(
   // every deployed backend (webFetch's toMarkdown conversion depends on it).
   config.ai = { binding: "WORKERS_AI" };
   config.services = backendGatekeeperServices(gatekeepers, baseUrl);
-  // The origin is the only value the backend needs that is safe to write down here: ADMINS and the
-  // Cloudflare Access pair are uploaded as *secrets* instead, out of band, because Wrangler prints
-  // every plain-text var's value in its deploy summary and this workflow's logs are public. See
-  // {@link backendSecrets} and preview.ts.
+  // The origin and password-auth preference are safe to print. ADMINS and the Cloudflare Access
+  // pair are uploaded as *secrets* instead, out of band, because Wrangler prints every plain-text
+  // var's value in its deploy summary and this workflow's logs are public. See backendSecrets().
   config.vars = {
     ...config.vars,
+    DISABLE_PASSWORD_AUTH: "true",
     PUBLIC_BASE_URL: baseUrl,
   };
   config.previews = {
@@ -520,8 +520,8 @@ export function resolveTarget({
 export interface AccessConfig {
   /** The application's audience tag, matched as the JWT's `aud`. */
   aud: string;
-  /** Team domain that issued the JWT, e.g. `https://<team>.cloudflareaccess.com`. */
-  iss: string;
+  /** Team hostname that issued the JWT, e.g. `<team>.cloudflareaccess.com`. */
+  teamDomain: string;
 }
 
 /**
@@ -529,27 +529,33 @@ export interface AccessConfig {
  *
  * Required, like {@link resolveTarget}'s pair and for the same reasons. A preview is a public
  * workers.dev URL holding real gatekeeper capabilities, and an unset pair does not fail — the
- * backend can verify no assertion (access.ts) and quietly falls back to password signup — so this
- * fails closed rather than deploying an instance whose auth silently differs. The two move together
- * because verifying an assertion needs both, and either one alone verifies nothing.
+ * backend treats either configured value as an enabled Access deployment and rejects `/api` when
+ * it cannot verify an assertion. Requiring the complete pair here turns that fail-closed outage
+ * into a deploy-time error. The two move together because verifying an assertion needs both.
  *
  * The environment is read in the parameter defaults rather than the body so that
  * env-passthrough.test.js, whose discovery is textual, can see both names.
  */
 export function resolveAccess({
-  aud = process.env.CF_ACCESS_AUD,
-  iss = process.env.CF_ACCESS_ISS,
-}: { aud?: string; iss?: string } = {}): AccessConfig {
-  if (!aud || !iss) {
+  aud = process.env.ACCESS_APP_AUD,
+  teamDomain = process.env.ACCESS_TEAM_DOMAIN,
+}: { aud?: string; teamDomain?: string } = {}): AccessConfig {
+  aud = aud?.trim();
+  teamDomain = teamDomain?.trim().toLowerCase();
+  if (!aud || !teamDomain) {
     const missing = [
-      ...(aud ? [] : ["CF_ACCESS_AUD"]),
-      ...(iss ? [] : ["CF_ACCESS_ISS"]),
+      ...(aud ? [] : ["ACCESS_APP_AUD"]),
+      ...(teamDomain ? [] : ["ACCESS_TEAM_DOMAIN"]),
     ];
     throw new Error(`${missing.join(" and ")} must be set: together they name the Cloudflare ` +
-        "Access application that authenticates a preview, and a preview deployed without it " +
-        "would fall back to password signup on a public URL");
+        "Access application that authenticates a preview; public previews require this gate");
   }
-  return { aud, iss };
+  if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudflareaccess\.com$/.test(
+      teamDomain)) {
+    throw new Error("ACCESS_TEAM_DOMAIN must be a cloudflareaccess.com hostname without a " +
+        "scheme or path");
+  }
+  return { aud, teamDomain };
 }
 
 /**
@@ -647,8 +653,8 @@ export function resolveAiGateway({
  * uploads these over stdin instead, with `wrangler preview secret bulk`, which prints names and
  * `********`.
  *
- * Setting the Access pair is also what closes the password path — the backend's `login()` and
- * `createAccount()` both throw once CF_ACCESS_AUD is set — so DISABLE_PASSWORD_AUTH is not needed.
+ * Access is the preview's exclusive authentication boundary. Its non-secret password-auth kill
+ * switch is written by applyBackend(); only the values that identify the deployment travel here.
  */
 export function backendSecrets({
   admins = resolveAdmins(),
@@ -664,8 +670,8 @@ export function backendSecrets({
     // form: ".env doesn't actually let you specify JSON bindings, so we also support a string that
     // parses as JSON array".
     ADMINS: JSON.stringify(admins),
-    CF_ACCESS_AUD: access.aud,
-    CF_ACCESS_ISS: access.iss,
+    ACCESS_APP_AUD: access.aud,
+    ACCESS_TEAM_DOMAIN: access.teamDomain,
     // The gateway name and its account are not secret in the way the token is, but they travel the
     // same way rather than as vars: one mechanism, and nothing about the deployment in the log.
     ...aiGateway,

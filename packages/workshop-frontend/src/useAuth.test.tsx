@@ -5,8 +5,9 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { PublicApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import type { PublicApi, AiChatAuthorInfo, ServerConfig } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { ServerConfigContext } from './ServerConfigContext'
 import { useAuth } from './useAuth'
 
 vi.mock('./errorReporting', () => ({
@@ -16,20 +17,46 @@ vi.mock('./errorReporting', () => ({
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const person: AiChatAuthorInfo = { type: 'user', id: 'person@example.com', name: 'Person' }
+const serverConfig: ServerConfig = {
+  accessAuthEnabled: false,
+  authVendors: [],
+  passwordAuthEnabled: true,
+  cloudflareLimitsEnabled: false,
+  signupsEnabled: true,
+  siteName: '',
+  announcement: '',
+  banner: '',
+  bannerColor: 'neutral',
+  accentColor: '',
+}
+const accessServerConfig: ServerConfig = {
+  ...serverConfig,
+  accessAuthEnabled: true,
+  passwordAuthEnabled: false,
+}
 
-/** A public API whose authenticated stub resolves `whoami` to `author`, or rejects without one. */
-function stubPublicApi(author?: AiChatAuthorInfo): RpcStub<PublicApi> {
-  const authenticated = {
+/** A public API with optional ordinary-session and Access identities. */
+function stubPublicApi(
+  author?: AiChatAuthorInfo,
+  accessAuthor?: AiChatAuthorInfo,
+): RpcStub<PublicApi> {
+  const stubFor = (identity?: AiChatAuthorInfo) => ({
     whoami: async () => {
-      if (!author) throw new Error('session gone')
-      return author
+      if (!identity) throw new Error('not authenticated')
+      return identity
     },
     amIAdmin: async () => false,
     [Symbol.dispose]: () => {},
-  }
+  })
   return {
-    authenticate: () => authenticated,
-    authenticateFromCfAccess: () => authenticated,
+    authenticate: () => {
+      if (!author) throw new Error('not authenticated')
+      return stubFor(author)
+    },
+    authenticateFromCfAccess: () => {
+      if (!accessAuthor) throw new Error('Access is off')
+      return stubFor(accessAuthor)
+    },
   } as unknown as RpcStub<PublicApi>
 }
 
@@ -52,7 +79,10 @@ function deferredPublicApi(): {
     return { whoami: () => pending, [Symbol.dispose]: () => {} }
   }
   return {
-    api: { authenticate, authenticateFromCfAccess: authenticate } as unknown as RpcStub<PublicApi>,
+    api: {
+      authenticate,
+      authenticateFromCfAccess: () => { throw new Error('Access is off') },
+    } as unknown as RpcStub<PublicApi>,
     release: (nth, author) => releases[nth](author),
   }
 }
@@ -65,6 +95,7 @@ describe('useAuth error reporting identity', () => {
 
   afterEach(() => {
     act(() => roots.forEach(root => root.unmount()))
+    vi.useRealTimers()
     roots.length = 0
     containers.forEach(container => container.remove())
     containers.length = 0
@@ -73,15 +104,23 @@ describe('useAuth error reporting identity', () => {
     vi.clearAllMocks()
   })
 
-  /** Mounts an independent `useAuth` instance, returning its login/logout handles. */
+  /** Mounts an independent `useAuth` instance through the real server-config context wiring. */
   async function mount(
     publicApi: RpcStub<PublicApi>,
-    hook: typeof useAuth = useAuth,
-  ): Promise<{ controls: Controls; root: Root }> {
-    const captured: { controls?: Controls } = {}
+    config: ServerConfig | null = serverConfig,
+  ): Promise<{
+    controls: Controls
+    root: Root
+    authState: () => Pick<ReturnType<typeof useAuth>, 'isLoading' | 'error'>
+  }> {
+    const captured: {
+      controls?: Controls
+      authState?: Pick<ReturnType<typeof useAuth>, 'isLoading' | 'error'>
+    } = {}
     function Consumer() {
-      const { login, logout } = hook(publicApi)
+      const { login, logout, isLoading, error } = useAuth(publicApi)
       captured.controls = { login, logout }
+      captured.authState = { isLoading, error }
       return null
     }
 
@@ -90,8 +129,12 @@ describe('useAuth error reporting identity', () => {
     containers.push(container)
     const root = createRoot(container)
     roots.push(root)
-    await act(async () => root.render(<Consumer />))
-    return { controls: captured.controls!, root }
+    await act(async () => root.render(
+      <ServerConfigContext.Provider value={config}>
+        <Consumer />
+      </ServerConfigContext.Provider>,
+    ))
+    return { controls: captured.controls!, root, authState: () => captured.authState! }
   }
 
   it('names the user when a stored token authenticates on mount', async () => {
@@ -112,17 +155,87 @@ describe('useAuth error reporting identity', () => {
     expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
   })
 
-  it('names the user when CF Access authenticates without a token', async () => {
-    vi.stubEnv('VITE_CF_ACCESS_MODE', 'true')
-    vi.resetModules()
-    // Both imports must come from the reset registry, or the assertion would watch a mock instance
-    // that the freshly imported hook never calls.
-    const { setReportedUserId: setId } = await import('./errorReporting')
-    const { useAuth: cfAccessUseAuth } = await import('./useAuth')
+  it('names the user when Access authenticates without an app token', async () => {
+    await mount(stubPublicApi(undefined, person), accessServerConfig)
 
-    await mount(stubPublicApi(person), cfAccessUseAuth)
+    expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  })
 
-    expect(setId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  it('makes Access take precedence and purges a stale stored app session', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const authenticate = vi.fn<() => void>()
+    const authenticateFromCfAccess = vi.fn<() => object>(() => ({
+      whoami: async () => person,
+      [Symbol.dispose]: () => {},
+    }))
+    const api = {
+      authenticateFromCfAccess,
+      authenticate,
+    } as unknown as RpcStub<PublicApi>
+
+    await mount(api, accessServerConfig)
+
+    expect(authenticateFromCfAccess).toHaveBeenCalledOnce()
+    expect(authenticate).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBeNull()
+    expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  })
+
+  it('uses only the Access identity when both identity sources are available', async () => {
+    const calls: string[] = []
+    localStorage.setItem('authToken', 'stored-token')
+    const api = {
+      authenticateFromCfAccess: () => {
+        calls.push('access')
+        return {
+          whoami: async () => person,
+          [Symbol.dispose]: () => {},
+        }
+      },
+      authenticate: () => {
+        calls.push('session')
+        return {
+          whoami: async () => ({ ...person, id: 'stale@example.com' }),
+          [Symbol.dispose]: () => {},
+        }
+      },
+    } as unknown as RpcStub<PublicApi>
+
+    await mount(api, accessServerConfig)
+
+    expect(calls).toEqual(['access'])
+    expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
+  })
+
+  it('falls back to the signed-out state when Access is unavailable', async () => {
+    await mount(stubPublicApi(), accessServerConfig)
+
+    expect(setReportedUserId).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBeNull()
+  })
+
+  it('does not call the Access RPC when the server reports the feature off', async () => {
+    const authenticateFromCfAccess = vi.fn<() => never>(() => {
+      throw new Error('must not be called')
+    })
+    const api = { authenticateFromCfAccess } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+
+    expect(authenticateFromCfAccess).not.toHaveBeenCalled()
+  })
+
+  it('stops loading if server configuration never settles', async () => {
+    vi.useFakeTimers()
+    const { authState } = await mount(stubPublicApi(), null)
+
+    expect(authState()).toMatchObject({ isLoading: true, error: null })
+    await act(async () => vi.advanceTimersByTime(10_000))
+
+    expect(authState()).toMatchObject({
+      isLoading: false,
+      error: 'Authentication configuration timed out.',
+    })
   })
 
   it('keeps the identity when one instance unmounts while another stays mounted', async () => {

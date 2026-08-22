@@ -93,7 +93,7 @@ function workshopConfig(
     entrypoint: "GatekeeperVendor",
   }));
 
-  // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
+  // No Access team-domain/AUD pair, so password signup remains available.
   config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
 
   // Gadget code is never executed here (a gatekeeper is in observer scope purely by having a

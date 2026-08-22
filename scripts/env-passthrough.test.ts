@@ -54,7 +54,6 @@ const EXPECTED: Record<string, ExpectedArea> = {
   "packages/workshop-frontend": {
     forwarded: [
       "VITE_BACKEND_HOST",
-      "VITE_CF_ACCESS_MODE",
       "VITE_DEV_AUTO_LOGIN",
       "VITE_DEV_PASSWORD",
       "VITE_DEV_USERNAME",
@@ -70,7 +69,7 @@ const EXPECTED: Record<string, ExpectedArea> = {
   scripts: {
     forwarded: ["VITE_FRONTEND_ERROR_REPORTING"],
     external: [
-      "CF_ACCESS_AUD", "CF_ACCESS_ISS", "CF_AI_GATEWAY", "CF_AI_GATEWAY_ACCOUNT_ID",
+      "ACCESS_APP_AUD", "ACCESS_TEAM_DOMAIN", "CF_AI_GATEWAY", "CF_AI_GATEWAY_ACCOUNT_ID",
       "CF_AI_GATEWAY_API_TOKEN", "CF_AI_GATEWAY_PROVIDERS", "CF_AI_GATEWAY_USE_BINDING",
       "CI_COMMIT_SHA", "CI_PIPELINE_IID", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
       "GITHUB_REPOSITORY", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_NAME",

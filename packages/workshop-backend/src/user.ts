@@ -318,29 +318,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  /**
-   * Returns true when this login created the account on first use. When the account doesn't yet
-   * exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
-   * existing users can still sign in.
-   */
-  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    if (!this.storage.created.get()) {
-      if (!allowCreate) {
-        throw new Error("New sign-ups are currently disabled on this deployment.");
-      }
-      // Create on first use.
-      this.storage.created.put(true);
-      this.storage.profile.put({
-        type: "user",
-        name: email.split("@")[0],
-        id: email,
-      });
-      return true;
-    }
-
-    return false;
-  }
-
   async #newSessionToken(): Promise<string> {
     let sessionToken = new Uint8Array(32);
     crypto.getRandomValues(sessionToken);
@@ -413,7 +390,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+  #provisionFromVerifiedEmail(email: string, allowCreate: boolean): boolean | null {
+    let accountCreated = false;
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
@@ -422,8 +400,26 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         name: email.split("@")[0],
         id: email,
       });
+      accountCreated = true;
     }
-    return this.#newSessionToken();
+    return accountCreated;
+  }
+
+  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+    const accountCreated = this.#provisionFromVerifiedEmail(email, allowCreate);
+    return accountCreated === null ? null : this.#newSessionToken();
+  }
+
+  /**
+   * Provisions the account for a signature-verified, normalized Cloudflare Access email. Access is
+   * the deployment's signup policy, so first use always creates the email-keyed account with no
+   * password credential. No app session is minted: the request's verified Access assertion is the
+   * credential for the returned RPC capability, and a discarded permanent session row would only
+   * leak storage on every reconnect.
+   */
+  async provisionViaAccess(email: string): Promise<boolean> {
+    email = normalizeAccessEmail(email);
+    return this.#provisionFromVerifiedEmail(email, true)!;
   }
 
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
@@ -1774,4 +1770,16 @@ export function normalizeUsername(username: string) {
   }
 
   return username;
+}
+
+/** Normalize a verified IdP email while keeping its DO namespace disjoint from app usernames. */
+export function normalizeAccessEmail(email: string): string {
+  const normalized = email.toLowerCase().normalize("NFC");
+  // The `@` is not legal in normalizeUsername(), so a verified-email DO can never collide with a
+  // password-account DO. Requiring one non-whitespace local and domain part makes that invariant
+  // explicit instead of relying on Cloudflare's current claim shape.
+  if (!/^[^\s@]+@[^\s@]+$/.test(normalized)) {
+    throw new Error("Cloudflare Access email claim was not a valid email address.");
+  }
+  return normalized;
 }

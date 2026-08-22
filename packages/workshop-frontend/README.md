@@ -10,7 +10,7 @@ pnpm exec vp run build  # type-check and build for production
 pnpm preview            # preview production build locally
 ```
 
-`build` is a Vite+ task, not a package.json script, so that it can declare the `VITE_*` flags below
+`build` is a Vite+ task, not a package.json script, so that it can declare the `VITE_*` flags
 as fingerprinted env: a cached `vp` run executes each task in a clean environment, which drops any
 ambient value, and a flag the fingerprint ignores means a changed flag replays the old bundle.
 
@@ -18,33 +18,13 @@ It always produces a production bundle, whatever `NODE_ENV` the shell holds, and
 before building — a cache hit restores archived files without deleting any, so the previous build's
 sourcemaps would otherwise linger. `vite.config.ts` documents both.
 
-## Authentication modes
+## Authentication bootstrap
 
-The frontend supports two authentication modes, selected at build time.
+Every frontend build first tries `authenticateFromCfAccess()` at runtime. When the backend has a
+valid Cloudflare Access assertion, the user lands directly in the app. When Access is not configured
+or the assertion cannot be verified, the frontend continues through the existing stored-session and
+login/signup flow. No frontend build flag is required.
 
-### Password mode (default)
-
-Users log in with a username and password. Account creation is available via `/signup`.
-This is the default — no extra configuration needed.
-
-### Cloudflare Access mode
-
-When the backend is deployed behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/applications/), Access handles identity before the user ever reaches the app. In this mode:
-
-- The password-based login page and signup page are disabled.
-- On load, the app authenticates automatically using the CF Access session that Access has already established (via `authenticateFromCfAccess()` on the server).
-
-To build in CF Access mode, set `VITE_CF_ACCESS_MODE=true`:
-
-```sh
-VITE_CF_ACCESS_MODE=true pnpm exec vp run build
-```
-
-Or add it to a `.env` file for persistent local configuration:
-
-```sh
-# .env.local
-VITE_CF_ACCESS_MODE=true
-```
-
-The backend also needs to be configured with the `CF_ACCESS_ISS` and `CF_ACCESS_AUD` environment variables (see the workshop-backend package) for the JWT verification to work.
+Enable Access on the backend with both `ACCESS_TEAM_DOMAIN` (hostname only, such as
+`team.cloudflareaccess.com`) and `ACCESS_APP_AUD`. Leaving both absent preserves ordinary local and
+password-based development.

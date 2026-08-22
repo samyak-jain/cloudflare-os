@@ -9,6 +9,7 @@ import { isCloudflareLimitsEnabled } from "./ai-gateway-billing/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { readAdminConfig } from "./admin-config.js";
 import { siteLogoImage } from "./site-logo.js";
+import { hasAccessConfiguration } from "./access.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
@@ -18,6 +19,7 @@ const logger = createWorkshopLogger("workshop.deployment.config");
  * providesAuth, or that error.
  */
 export async function getAuthVendors(env: Cloudflare.Env): Promise<AuthVendorInfo[]> {
+  if (hasAccessConfiguration(env)) return [];
   // describe() is a cross-Worker RPC and getServerConfig() runs on every (re)connect, so query the
   // allowlisted vendors in parallel rather than serially. Order is preserved (Promise.all), so the
   // sign-in button order still follows the allowlist.
@@ -48,6 +50,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     getAuthVendors(env),
   ]);
   return {
+    accessAuthEnabled: hasAccessConfiguration(env),
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),

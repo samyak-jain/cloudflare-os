@@ -211,13 +211,8 @@ function describe(error: unknown): string {
 // Codegen, the frontend bundle the router serves, and each gatekeeper's SPA bundle. Vite+ caches
 // per task, so this is cheap on a warm tree.
 //
-// Whether the UI signs in through Cloudflare Access or with a password is a build-time flag
-// (workshop-frontend/src/useAuth.ts), so a preview needs the same one build-release.mjs sets:
-// otherwise it serves a password form the backend rejects every password from. The frontend's
-// `build` task already declares `env: ['VITE_*']`.
 function buildWorkspace(): Promise<void> {
-  return runAsync("pnpm", ["run", "build"],
-      { cwd: ROOT, env: { ...process.env, VITE_CF_ACCESS_MODE: "true" } });
+  return runAsync("pnpm", ["run", "build"], { cwd: ROOT });
 }
 
 function preparePreviewWrangler(): PreviewWrangler {
@@ -569,7 +564,7 @@ function tiers(packages: readonly DeployablePackage[]): {
 }
 
 async function deploy({ dryRun }: { dryRun: boolean }): Promise<void> {
-  // First, before a single config is written: a missing CF_ACCESS_AUD/CF_ACCESS_ISS has to fail
+  // First, before a single config is written: a missing Access team-domain/AUD pair has to fail
   // here rather than after eighteen previews are live with whatever auth they defaulted to.
   const secrets = backendSecrets();
   const { previewName, workersDevHost, baseUrl, packages } = generatePreviewConfigs();

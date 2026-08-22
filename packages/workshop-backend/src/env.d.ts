@@ -64,10 +64,10 @@ declare global {
       // unaffected. OAuth app credentials live on the gatekeeper Workers, not here.
       // ---------------------------------------------------------------------------------------------
 
-      // Cloudflare Access configuration. When CF_ACCESS_AUD is set, the deployment authenticates via
-      // Cloudflare Access (SSO). (Also referenced via a local Env extension in server.ts.)
-      CF_ACCESS_AUD?: string;   // audience
-      CF_ACCESS_ISS?: string;   // team URL, e.g. https://<team>.cloudflareaccess.com
+      // Optional Cloudflare Access SSO. Both must be present; otherwise Access bootstrap cannot
+      // authenticate and the frontend falls back to the normal login/signup UI.
+      ACCESS_TEAM_DOMAIN?: string;  // hostname only, e.g. <team>.cloudflareaccess.com
+      ACCESS_APP_AUD?: string;      // Access application's audience tag
 
       // Comma-separated allowlist of gatekeeper vendor ids permitted to drive sign-in (e.g.
       // "google,github,cloudflare"). A listed gatekeeper must also advertise providesAuth. Empty =

@@ -104,8 +104,8 @@ jobs:
           # `wrangler preview secret bulk`, and never written into a config file — Wrangler prints
           # the values it finds in one, and this log is public.
           PREVIEW_ADMINS: ${{ secrets.PREVIEW_ADMINS }}
-          CF_ACCESS_AUD: ${{ secrets.CF_ACCESS_AUD }}
-          CF_ACCESS_ISS: ${{ secrets.CF_ACCESS_ISS }}
+          ACCESS_APP_AUD: ${{ secrets.ACCESS_APP_AUD }}
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
           # AI Gateway, so a preview's chats use server-managed keys rather than asking each user
           # for their own. Optional as a group: with CF_AI_GATEWAY unset the preview is BYOK, but
           # once it is set the account id is required.

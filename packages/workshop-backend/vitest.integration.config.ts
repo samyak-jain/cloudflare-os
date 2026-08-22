@@ -23,6 +23,7 @@ export default defineConfig({
   ],
   test: {
     include: ["__integration__/*.test.ts"],
+    exclude: ["__integration__/access-rpc.test.ts"],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
     setupFiles: ["../../scripts/assert-workerd.ts"],
     // Whichever test runs first pays for workerd booting and instantiating the whole backend

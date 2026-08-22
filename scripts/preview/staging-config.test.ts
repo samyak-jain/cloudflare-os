@@ -35,7 +35,7 @@ const ACCOUNT_ID = "0".repeat(32);
 const WORKERS_DEV_HOST = "example.workers.dev";
 const BASE_URL = routerPreviewUrl(PREVIEW_NAME, WORKERS_DEV_HOST);
 const ADMIN = "someone@example.com";
-const ACCESS = { aud: "a".repeat(64), iss: "https://previews-example.cloudflareaccess.com" };
+const ACCESS = { aud: "a".repeat(64), teamDomain: "previews-example.cloudflareaccess.com" };
 const AI_GATEWAY = {
   gateway: "example-gateway",
   accountId: "1".repeat(32),
@@ -244,27 +244,24 @@ test("no config names a resource belonging to another deployment", () => {
   }
 });
 
-test("the backend is told the router's origin, and nothing else", () => {
+test("the backend is told the router's origin and password-auth preference", () => {
   const { configs } = buildAll();
   const vars = previewsOf(configs, "workshop-backend").vars;
   assert.ok(vars, "the backend preview declares no vars");
 
-  // The origin is the only value the backend needs that is safe to write into a config Wrangler
-  // will print; its admins and Access pair are uploaded as secrets instead (below).
-  assert.deepEqual(Object.keys(vars), ["PUBLIC_BASE_URL"]);
+  // Both values are safe to print; admins and the authoritative Access pair are secrets instead.
+  assert.deepEqual(Object.keys(vars).toSorted(), ["DISABLE_PASSWORD_AUTH", "PUBLIC_BASE_URL"]);
+  assert.equal(vars.DISABLE_PASSWORD_AUTH, "true");
   assert.equal(vars.PUBLIC_BASE_URL, BASE_URL);
-  // Setting CF_ACCESS_AUD closes the password path on its own — login() and createAccount() both
-  // throw once it is set — so this stays unset.
-  assert.equal(vars.DISABLE_PASSWORD_AUTH, undefined);
 });
 
-test("the backend's secrets are the admin list, the Access pair and the AI gateway", () => {
+test("the backend's secrets carry Access, admin and AI settings", () => {
   // A secret is always text, so the admin list travels as JSON — the form `#isAdmin()` already
   // parses. Everything here is uploaded by preview.ts, never written to a config.
   assert.deepEqual(SECRETS, {
     ADMINS: `["${ADMIN}"]`,
-    CF_ACCESS_AUD: ACCESS.aud,
-    CF_ACCESS_ISS: ACCESS.iss,
+    ACCESS_APP_AUD: ACCESS.aud,
+    ACCESS_TEAM_DOMAIN: ACCESS.teamDomain,
     CF_AI_GATEWAY: AI_GATEWAY.gateway,
     CF_AI_GATEWAY_ACCOUNT_ID: AI_GATEWAY.accountId,
     CF_AI_GATEWAY_API_TOKEN: AI_GATEWAY.apiToken,
@@ -467,8 +464,14 @@ test("the Access application has no default, in either direction", () => {
   // pair moves together, since an audience without an issuer cannot be verified and an issuer
   // without an audience verifies nothing in particular.
   assert.deepEqual(resolveAccess(ACCESS), ACCESS);
-  assert.throws(() => resolveAccess({ aud: "", iss: "" }),
-      /CF_ACCESS_AUD and CF_ACCESS_ISS/);
-  assert.throws(() => resolveAccess({ aud: ACCESS.aud, iss: "" }), /CF_ACCESS_ISS must be set/);
-  assert.throws(() => resolveAccess({ aud: "", iss: ACCESS.iss }), /CF_ACCESS_AUD must be set/);
+  assert.throws(() => resolveAccess({ aud: "", teamDomain: "" }),
+      /ACCESS_APP_AUD and ACCESS_TEAM_DOMAIN/);
+  assert.throws(() => resolveAccess({ aud: ACCESS.aud, teamDomain: "" }),
+      /ACCESS_TEAM_DOMAIN must be set/);
+  assert.throws(() => resolveAccess({ aud: "", teamDomain: ACCESS.teamDomain }),
+      /ACCESS_APP_AUD must be set/);
+  assert.throws(() => resolveAccess({ aud: ACCESS.aud,
+    teamDomain: `https://${ACCESS.teamDomain}` }), /hostname without a scheme or path/);
+  assert.deepEqual(resolveAccess({ aud: ` ${ACCESS.aud} `,
+    teamDomain: ` ${ACCESS.teamDomain.toUpperCase()} ` }), ACCESS);
 });

@@ -83,4 +83,8 @@ jobs:
         run: pnpm build
 
       - name: Test
+        # The Hermes wire-contract tests exercise an operator-owned sibling worktree that is not
+        # part of this repository and is therefore unavailable on a clean GitHub runner.
+        env:
+          HERMES_CONTRACT_SKIP: "1"
         run: pnpm test
