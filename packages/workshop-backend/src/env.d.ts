@@ -86,6 +86,12 @@ declare global {
       // character art is reworked.
       FEATURE_CHAT_AVATAR?: string;
 
+      // Background chat/workspace titles through the operator's ChatGPT subscription. The feature
+      // is active only when all three values are present; refresh tokens rotate into DO storage.
+      FEATURE_CHATGPT_AUTO_NAMING?: string;
+      CHATGPT_REFRESH_TOKEN?: string;
+      CHATGPT_ACCOUNT_ID?: string;
+
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 

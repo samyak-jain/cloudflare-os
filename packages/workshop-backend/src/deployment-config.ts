@@ -13,6 +13,12 @@ import { hasAccessConfiguration } from "./access.js";
 
 const logger = createWorkshopLogger("workshop.deployment.config");
 
+/** Whether deployment-owned ChatGPT subscription naming is fully configured. */
+export function isSubscriptionNamingEnabled(env: Cloudflare.Env): boolean {
+  return env.FEATURE_CHATGPT_AUTO_NAMING === "true" &&
+    !!env.CHATGPT_REFRESH_TOKEN && !!env.CHATGPT_ACCOUNT_ID;
+}
+
 /**
  * Resolve the auth-capable, allowlisted gatekeeper vendors offered as sign-in methods, querying
  * each gatekeeper's describe() for display info. Skips vendors with no binding, that don't advertise

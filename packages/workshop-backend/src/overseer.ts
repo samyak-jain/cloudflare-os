@@ -56,6 +56,7 @@ import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { isSubscriptionNamingEnabled } from "./deployment-config";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
@@ -1019,6 +1020,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
+
+      // Provenance and cadence for subscription-generated workspace names. Absence on a non-default
+      // title is treated as a legacy/manual title and is therefore never overwritten.
+      titleSource: <"auto" | "manual" | undefined>undefined,
+      lastTitledMessageCount: 0,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -3796,7 +3802,8 @@ class OverseerImpl implements AgentHooks {
     // binding additions to existing gadgets doesn't count: it creates no commits, so the first
     // merge with code -- including an accepted creation's empty first commit -- still sees
     // isFirstChange and generates the title then.)
-    if (isFirstChange && commits.length > 0 && userMeta.quickModel) {
+    if (isFirstChange && commits.length > 0 && userMeta.quickModel &&
+        !isSubscriptionNamingEnabled(this.env)) {
       this.generateGadgetTitle(chatId, userMeta.quickModel, userMeta.profile);
     }
     this.recordGadgetAnalytics({
@@ -5365,7 +5372,7 @@ class OverseerImpl implements AgentHooks {
                       clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
 
-    if (userMeta.quickModel) {
+    if (userMeta.quickModel && !isSubscriptionNamingEnabled(this.env)) {
       let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
         prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
         `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
@@ -6000,6 +6007,9 @@ class OverseerImpl implements AgentHooks {
         delete meta.activeAgent;
         meta.lastActive = this.getChatTimestamp();
         this.storage.chatMeta.put(meta);
+        if (isSubscriptionNamingEnabled(this.env)) {
+          this.ctx.waitUntil(this.maybeGenerateSubscriptionTitles(chatId));
+        }
       }
 
       // Tear down the registry entry, persistent `activeAgents` record, and keep-alive alarm in the
@@ -7404,6 +7414,92 @@ class OverseerImpl implements AgentHooks {
       // Oh well, just leave the title as "New Chat".
       this.logger.warn("error generating chat title", {
         event: "chat.title.generate.failed", chatId, error: err,
+      });
+    }
+  }
+
+  private subscriptionTitleDigest(chatId: number): {
+    prompt: string,
+    messageCount: number,
+    hasCompletedExchange: boolean,
+  } {
+    const messages = [...this.storage.chats.list({prefix: `${keyString(chatId)}.`})]
+      .filter(msg => msg.type === "message");
+    const recent = messages.slice(-12).map(msg => {
+      const text = msg.message.replace(/\s+/g, " ").trim().slice(0, 500);
+      return `[${msg.author.type}]: ${text}`;
+    });
+    return {
+      messageCount: messages.length,
+      hasCompletedExchange: messages.some(msg => msg.author.type === "user") &&
+        messages.some(msg => msg.author.type !== "user"),
+      prompt: "Create a concise 3-6 word chat title for this transcript. Return only the title, " +
+        "with no quotes, emoji, or trailing punctuation.\n\n" + recent.join("\n").slice(-4_000),
+    };
+  }
+
+  private workspaceConversationalMessageCount(): number {
+    let count = 0;
+    for (const message of this.storage.chats.list()) {
+      if (message.type === "message") count++;
+    }
+    return count;
+  }
+
+  // Runs only from waitUntil after a turn has fully completed. Every check is repeated after model
+  // I/O so a concurrent manual rename always wins.
+  async maybeGenerateSubscriptionTitles(chatId: number): Promise<void> {
+    try {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (!meta || meta.titleSource === "manual") return;
+      const { prompt, messageCount, hasCompletedExchange } = this.subscriptionTitleDigest(chatId);
+      const firstTitle = meta.title === "New Chat" && meta.titleSource === undefined;
+      if (!hasCompletedExchange || (!firstTitle &&
+          (meta.titleSource !== "auto" || messageCount - (meta.lastTitledMessageCount ?? 0) < 8))) {
+        return;
+      }
+
+      const title = await this.ctx.exports.AdminSettings.getByName("")
+        .generateSubscriptionTitle(prompt);
+      if (!title) return;
+
+      meta = this.storage.chatMeta.get(chatId);
+      if (!meta || meta.titleSource === "manual") return;
+      const currentCount = this.subscriptionTitleDigest(chatId).messageCount;
+      if (meta.title !== "New Chat" && meta.titleSource !== "auto") return;
+      meta.title = title;
+      meta.titleSource = "auto";
+      meta.lastTitledMessageCount = currentCount;
+      meta.lastActive = this.getChatTimestamp();
+      this.storage.chatMeta.put(meta);
+
+      const workspaceTitle = this.storage.title.get();
+      const workspaceSource = this.storage.titleSource.get();
+      const lastWorkspaceCount = this.storage.lastTitledMessageCount.get();
+      const workspaceMessageCount = this.workspaceConversationalMessageCount();
+      const mayNameWorkspace = workspaceTitle === "Untitled Workspace" || workspaceSource === "auto";
+      if (!mayNameWorkspace ||
+          (workspaceSource === "auto" && workspaceMessageCount - lastWorkspaceCount < 16)) {
+        return;
+      }
+      const workspacePrompt = "Create a concise 3-6 word workspace name based on this chat title " +
+        `and intent. Return only the name, with no quotes, emoji, or trailing punctuation.\n\n` +
+        `Chat title: ${title}\n${prompt}`;
+      const generatedWorkspaceTitle = await this.ctx.exports.AdminSettings.getByName("")
+        .generateSubscriptionTitle(workspacePrompt);
+      if (!generatedWorkspaceTitle || !this.ownerId) return;
+      if (this.storage.titleSource.get() === "manual") return;
+      const currentWorkspaceTitle = this.storage.title.get();
+      if (currentWorkspaceTitle !== "Untitled Workspace" &&
+          this.storage.titleSource.get() !== "auto") return;
+      this.storage.title.put(generatedWorkspaceTitle);
+      this.storage.titleSource.put("auto");
+      this.storage.lastTitledMessageCount.put(this.workspaceConversationalMessageCount());
+      const owner = this.users.get(this.users.idFromString(this.ownerId));
+      await owner.updateTitle(this.ctx.id.toString(), generatedWorkspaceTitle);
+    } catch (err) {
+      this.logger.warn("automatic naming failed", {
+        event: "subscription.naming.apply.failed", chatId, error: err,
       });
     }
   }
@@ -9603,6 +9699,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async setTitle(title: string): Promise<void> {
     this.impl.storage.title.put(title);
+    this.impl.storage.titleSource.put("manual");
     await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
   }
 
@@ -10574,6 +10671,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     meta.lastActive = this.impl.getChatTimestamp();
     meta.title = title;
+    meta.titleSource = "manual";
     this.impl.storage.chatMeta.put(meta);
   }
 

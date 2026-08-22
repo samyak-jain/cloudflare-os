@@ -2244,6 +2244,12 @@ export type AiChatMetadata = {
   started: Date,
   lastActive: Date,
 
+  /** Whether the current title was generated automatically or explicitly set by a user. */
+  titleSource?: "auto" | "manual";
+
+  /** Conversational message count when the automatic title was last generated. */
+  lastTitledMessageCount?: number;
+
   /**
    * If present, an LLM (described by the author info) is currently actively responding to the
    * chat.
