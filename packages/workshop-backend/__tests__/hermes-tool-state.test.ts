@@ -22,7 +22,7 @@ function fixture() {
 describe("Hermes durable tool claims", () => {
   it("writes the executing claim before granting execution", async () => {
     let { rows, machine } = fixture();
-    await expect(machine.claim(7, "turn-1", "call-1", "writeFile")).resolves.toEqual({
+    await expect(machine.claim(7, "session-1", "turn-1", "call-1", "writeFile")).resolves.toEqual({
       execute: true,
     });
     expect(rows.get(hermesToolCallKey("turn-1", "call-1"))).toMatchObject({
@@ -33,8 +33,8 @@ describe("Hermes durable tool claims", () => {
 
   it("serializes two racing deliveries on the in-memory claim waiter", async () => {
     let { machine } = fixture();
-    await machine.claim(7, "turn-1", "call-1", "createGadget");
-    let duplicate = machine.claim(7, "turn-1", "call-1", "createGadget");
+    await machine.claim(7, "session-1", "turn-1", "call-1", "createGadget");
+    let duplicate = machine.claim(7, "session-1", "turn-1", "call-1", "createGadget");
     let result = {
       result: "created",
       isError: false,
@@ -46,18 +46,18 @@ describe("Hermes durable tool claims", () => {
 
   it("replays a tagged mutation after restart but never re-executes executeCode", async () => {
     let { rows, machine } = fixture();
-    await machine.claim(7, "turn-1", "write", "writeFile");
-    await machine.claim(7, "turn-1", "code", "executeCode");
+    await machine.claim(7, "session-1", "turn-1", "write", "writeFile");
+    await machine.claim(7, "session-1", "turn-1", "code", "executeCode");
     let restarted = new HermesToolCallStateMachine({
       get: (key) => rows.get(key),
       put: (record) => {
         rows.set(hermesToolCallKey(record.turnId, record.callId), record);
       },
     });
-    await expect(restarted.claim(7, "turn-1", "write", "writeFile")).resolves.toEqual({
+    await expect(restarted.claim(7, "session-1", "turn-1", "write", "writeFile")).resolves.toEqual({
       execute: true,
     });
-    await expect(restarted.claim(7, "turn-1", "code", "executeCode")).resolves.toMatchObject({
+    await expect(restarted.claim(7, "session-1", "turn-1", "code", "executeCode")).resolves.toMatchObject({
       execute: false,
       result: { isError: true, result: "execution state unknown after crash" },
     });

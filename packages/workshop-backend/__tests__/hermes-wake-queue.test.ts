@@ -53,4 +53,34 @@ describe("Hermes durable wake queue", () => {
     });
     expect(records.size).toBe(1);
   });
+
+  it("skips a sleeping retry and advances the next ready wake", () => {
+    let { queue } = fixture();
+    queue.register(wake("a"), 1);
+    queue.register(wake("b"), 2);
+    queue.dequeue(7, 2);
+    expect(queue.fail(7, "turn-a", { kind: "transport" }, true, 100)).toMatchObject({
+      state: "queued",
+      attempts: 1,
+      nextAttemptAt: 100,
+    });
+    expect(queue.dequeue(7, 3)?.turnId).toBe("turn-b");
+  });
+
+  it("dead-letters permanent poison immediately and retryable failures after five attempts", () => {
+    let { queue } = fixture();
+    queue.register(wake("poison"), 1);
+    queue.dequeue(7, 1);
+    expect(queue.fail(7, "turn-poison", { kind: "http", status: 404 }, false, 0))
+      .toMatchObject({ state: "dead_letter", attempts: 1 });
+
+    queue.register(wake("retry"), 2);
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      queue.dequeue(7, attempt + 2);
+      let failed = queue.fail(
+        7, "turn-retry", { kind: "http", status: 503 }, true, attempt + 2,
+      );
+      expect(failed?.state).toBe(attempt === 5 ? "dead_letter" : "queued");
+    }
+  });
 });

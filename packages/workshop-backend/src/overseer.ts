@@ -10,7 +10,9 @@ import {
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
 import { createTypedStorage, collection, keyString } from "@gadgets/typed-storage";
-import type { HermesAttachedTurn, HermesToolResult } from "./hermes-driver";
+import {
+  classifyHermesFailure, HermesHttpError, type HermesAttachedTurn, type HermesToolResult,
+} from "./hermes-driver";
 import {
   HermesToolCallStateMachine, hermesToolCallKey, type HermesToolCallRecord,
 } from "./hermes-tool-state";
@@ -1154,6 +1156,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         primaryKey: record => hermesToolCallKey(record.turnId, record.callId),
         nonUniqueIndexes: {
           byChatId(record: HermesToolCallRecord) { return record.chatId; },
+          byTurnId(record: HermesToolCallRecord) { return record.turnId; },
         },
       }),
 
@@ -5876,6 +5879,17 @@ class OverseerImpl implements AgentHooks {
       // runAgent converts them back to a throw), carrying the failing request's HTTP status when
       // one was observed.
       let apiError = err instanceof AgentTurnError ? err : null;
+      let wakeDisposition = aiModel.config.provider === "hermes"
+        ? await this.#failHermesWake(chatId, err)
+        : undefined;
+      if (wakeDisposition?.state === "queued") {
+        turnLogger.warn("Hermes wake attachment will retry", {
+          event: "hermes.wake.retry.scheduled",
+          executionId: wakeDisposition.turnId,
+          failureCount: wakeDisposition.attempts,
+        });
+        return;
+      }
 
       // Report unexpected failures for triage. Skip expected provider 4xx (auth,
       // rate limit, quota/billing), which are ordinary control flow, not incidents.
@@ -6170,6 +6184,7 @@ class OverseerImpl implements AgentHooks {
       sessionId: wake.sessionId,
       eventsUrl: wake.eventsUrl,
       idempotencyKey: wake.idempotencyKey,
+      afterSeq: wake.committedAfterSeq,
     };
   }
 
@@ -6189,22 +6204,25 @@ class OverseerImpl implements AgentHooks {
     let registration: {record: HermesWakeRecord, created: boolean} | undefined;
     this.ctx.storage.transactionSync(() => {
       registration = this.#hermesWakeQueue.register(wake, Date.now());
-      if (registration.created && state.sessionId && state.sessionId !== wake.sessionId) {
-        this.storage.hermesToolResults.byChatId.delete(wake.chatId);
-      }
       if (registration.created) {
         state.sessionId = wake.sessionId;
         this.storage.hermesChats.put(state);
-        this.ctx.storage.setAlarm(Date.now() + 1000);
       }
     });
     if (!registration) throw new Error("Hermes wake registration transaction did not run.");
     if (registration.record.state === "terminal") return;
+    if (registration.created) await this.#scheduleAlarmAt(Date.now() + 1000);
 
     // Registration above is the acknowledgement barrier. If another turn is still unwinding, its
     // finally block observes attachedTurn and starts this one after it clears activeAgent.
     if (meta.activeAgent || this.isPreparingChatMessage(wake.chatId)) return;
     await this.#startNextHermesWake(wake.chatId);
+  }
+
+  getHermesWakeHealth(chatId?: number): HermesWakeRecord[] {
+    return [...this.storage.hermesWakes.list()]
+      .filter(record => chatId === undefined || record.chatId === chatId)
+      .toSorted((left, right) => left.acceptedAt - right.acceptedAt);
   }
 
   #hermesWakeRecords(chatId: number): HermesWakeRecord[] {
@@ -6216,9 +6234,61 @@ class OverseerImpl implements AgentHooks {
         .find(record => record.state === "running" || record.state === "queued");
   }
 
+  async #scheduleAlarmAt(timestamp: number): Promise<void> {
+    let current = await this.ctx.storage.getAlarm();
+    if (current === null || timestamp < current) await this.ctx.storage.setAlarm(timestamp);
+  }
+
+  async #failHermesWake(
+    chatId: number,
+    error: unknown,
+  ): Promise<HermesWakeRecord | undefined> {
+    let wake = this.#hermesWakeRecords(chatId).find(record => record.state === "running");
+    if (!wake) return undefined;
+    let chat = this.storage.hermesChats.get(chatId);
+    if (chat?.terminalTurnId === wake.turnId) {
+      this.completeHermesAttachedTurn(chatId, wake.turnId);
+      return this.storage.hermesWakes.get(wake.idempotencyKey);
+    }
+    let {metadata, retryable} = classifyHermesFailure(error);
+    let baseDelay = Math.min(30_000, 1_000 * 2 ** Math.min(wake.attempts, 7));
+    let jitteredDelay = Math.max(1, Math.round(baseDelay * (0.5 + Math.random())));
+    if (error instanceof HermesHttpError && error.retryAfterMs !== undefined) {
+      let minimum = Math.min(error.retryAfterMs, 60_000);
+      jitteredDelay = Math.max(
+        jitteredDelay,
+        minimum + Math.round(minimum * 0.25 * Math.random()),
+      );
+    }
+    let failed: HermesWakeRecord | undefined;
+    this.ctx.storage.transactionSync(() => {
+      failed = this.#hermesWakeQueue.fail(
+        chatId, wake.turnId, metadata, retryable, Date.now() + jitteredDelay,
+      );
+    });
+    if (failed?.state === "queued") await this.#scheduleAlarmAt(failed.nextAttemptAt);
+    if (failed?.state === "dead_letter") {
+      this.logger.error("Hermes wake moved to dead letter", {
+        event: "hermes.wake.dead_letter",
+        chatId,
+        executionId: failed.turnId,
+        operation: failed.idempotencyKey,
+        failureCount: failed.attempts,
+        statusText: failed.lastFailure?.kind,
+        statusCode: failed.lastFailure?.status,
+      });
+    }
+    return failed;
+  }
+
   async #startNextHermesWake(chatId: number): Promise<void> {
     let wake = this.#hermesWakeQueue.dequeue(chatId);
     if (!wake) return;
+    if (wake.terminalProjectionKey) {
+      this.completeHermesAttachedTurn(chatId, wake.turnId);
+      await this.#startNextHermesWake(chatId);
+      return;
+    }
     let state = this.storage.hermesChats.get(chatId);
     if (!state) throw new Error("Hermes chat state disappeared before wake dequeue.");
     let user = this.users.get(this.users.idFromString(state.initiatorUserId));
@@ -6237,7 +6307,8 @@ class OverseerImpl implements AgentHooks {
 
   async resumeHermesWakes(): Promise<void> {
     let chatIds = new Set([...this.storage.hermesWakes.list()]
-        .filter(record => record.state !== "terminal").map(record => record.chatId));
+        .filter(record => record.state === "queued" || record.state === "running")
+        .map(record => record.chatId));
     for (let chatId of chatIds) {
       let meta = this.storage.chatMeta.get(chatId);
       if (meta && !meta.activeAgent && !this.isPreparingChatMessage(chatId)) {
@@ -6249,17 +6320,41 @@ class OverseerImpl implements AgentHooks {
   recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void {
     let record = this.storage.hermesChats.get(chatId);
     if (!record) throw new Error("Hermes chat state was not registered before turn start.");
-    if (record.sessionId && record.sessionId !== sessionId) {
-      // Hermes changed epochs. Old turn results cannot be projected into the replacement session,
-      // but the user-visible chat log remains an audit history. A wake attachment stays registered
-      // until this turn's terminal persistence barrier so a crash can still reattach it.
-      this.storage.hermesToolResults.byChatId.delete(chatId);
-    }
     record.sessionId = sessionId;
     record.currentTurnId = turnId;
     delete record.terminalTurnId;
     delete record.terminalSequence;
     this.storage.hermesChats.put(record);
+  }
+
+  invalidateHermesSession(chatId: number): void {
+    let record = this.storage.hermesChats.get(chatId);
+    if (!record) return;
+    delete record.sessionId;
+    this.storage.hermesChats.put(record);
+  }
+
+  commitHermesTerminalProjection(
+      chatId: number, turnId: string, sequence: number, author: AiChatAuthorInfo,
+      msgs: AiChatMessageBodyWithModelData[], totalTokens: number,
+      aiGatewayLogId: string | undefined, aiGatewayLogRoute: AiGatewayLogRoute | undefined,
+      estimatedCost: number): boolean {
+    let committed = false;
+    this.ctx.storage.transactionSync(() => {
+      let projectionKey = `${turnId}:${sequence}`;
+      let wake = this.#hermesWakeRecords(chatId).find(
+        record => record.turnId === turnId,
+      );
+      if (wake?.terminalProjectionKey === projectionKey) return;
+      this.addChatMessages(chatId, author, msgs, totalTokens, aiGatewayLogId,
+          aiGatewayLogRoute, estimatedCost);
+      this.recordHermesTerminal(chatId, turnId, sequence);
+      if (wake?.state === "running") {
+        this.#hermesWakeQueue.projectTerminal(chatId, turnId, sequence, projectionKey);
+      }
+      committed = true;
+    });
+    return committed;
   }
 
   recordHermesTerminal(chatId: number, turnId: string, sequence: number): void {
@@ -6268,6 +6363,7 @@ class OverseerImpl implements AgentHooks {
     record.terminalTurnId = turnId;
     record.terminalSequence = sequence;
     this.storage.hermesChats.put(record);
+    this.storage.hermesToolResults.byTurnId.delete(turnId);
   }
 
   #completeTerminalHermesWake(chatId: number): void {
@@ -6276,12 +6372,16 @@ class OverseerImpl implements AgentHooks {
   }
 
   completeHermesAttachedTurn(chatId: number, turnId: string): void {
-    this.#hermesWakeQueue.complete(chatId, turnId);
+    this.ctx.storage.transactionSync(() => {
+      this.#hermesWakeQueue.complete(chatId, turnId);
+      this.storage.hermesToolResults.byTurnId.delete(turnId);
+    });
   }
 
-  async claimHermesToolCall(chatId: number, turnId: string, callId: string, toolName: string):
+  async claimHermesToolCall(
+      chatId: number, turnId: string, callId: string, toolName: string, sessionId: string):
       Promise<{execute: true} | {execute: false, result: HermesToolResult}> {
-    return this.#hermesToolCalls.claim(chatId, turnId, callId, toolName);
+    return this.#hermesToolCalls.claim(chatId, sessionId, turnId, callId, toolName);
   }
 
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void {
@@ -8382,6 +8482,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   /** Durably register and, when idle, attach an authenticated autonomous Hermes turn. */
   async acceptHermesWake(wake: HermesWakeRegistration): Promise<void> {
     await this.impl.acceptHermesWake(wake);
+  }
+
+  /** Inspect durable accepted/retrying/dead-letter wake state for deployment health checks. */
+  getHermesWakeHealth(chatId?: number): HermesWakeRecord[] {
+    return this.impl.getHermesWakeHealth(chatId);
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote

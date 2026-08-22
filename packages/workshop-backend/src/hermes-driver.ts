@@ -26,19 +26,25 @@ export type HermesAttachedTurn = {
   sessionId: string;
   eventsUrl: string;
   idempotencyKey: string;
+  /** Durable projection cursor for this accepted attachment. */
+  afterSeq: number;
 };
 
 /** Transport and persistence callbacks supplied by the Workshop agent/Overseer boundary. */
 export interface HermesDriverHooks {
   emit(event: AgentEvent): Promise<void> | void;
+  emitTerminal?(turnId: string, sequence: number, event: AgentEvent): Promise<void> | void;
   claimToolCall(
     turnId: string,
     callId: string,
     toolName: string,
+    sessionId: string,
   ): Promise<{ execute: true } | { execute: false; result: HermesToolResult }>;
   resolveToolCall(turnId: string, callId: string, result: HermesToolResult): void;
   onTurnStarted(turnId: string, sessionId: string): void;
   onTerminalProjected?(turnId: string, sequence: number): void;
+  invalidateSession?(): void;
+  onDeltaFailure?(failure: HermesFailureMetadata): void;
   pauseReasonAfterMessage(): string | undefined;
   pauseReasonAfterTool(): string | undefined;
 }
@@ -62,6 +68,14 @@ export interface HermesDriverOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   /** Test override; production turns are capped at fifteen minutes. */
   turnTimeoutMs?: number;
+  /** Test override for the production hard-deadline grace period of sixty seconds. */
+  hardDeadlineGraceMs?: number;
+  /** Per-request header deadline. */
+  requestTimeoutMs?: number;
+  /** Maximum time an open SSE stream may produce no event. */
+  sseIdleTimeoutMs?: number;
+  /** Deterministic test seam for retry jitter. */
+  random?: () => number;
 }
 
 /** One bounded, idempotent workspace-state notice derived during Workshop replay. */
@@ -87,7 +101,44 @@ export class HermesHttpError extends Error {
   }
 }
 
-class HermesProtocolError extends Error {}
+/** A malformed or unsupported Hermes response. */
+export class HermesProtocolError extends Error {}
+
+/** A bounded local transport operation exceeded its deadline. */
+export class HermesTimeoutError extends Error {}
+
+/** Status/code-only failure information safe to retain in Durable Object storage. */
+export type HermesFailureMetadata = {
+  kind: "http" | "protocol" | "transport" | "timeout";
+  status?: number;
+  code?: string;
+};
+
+/** Classify a driver failure without retaining provider response bodies. */
+export function classifyHermesFailure(error: unknown): {
+  metadata: HermesFailureMetadata;
+  retryable: boolean;
+} {
+  if (error instanceof HermesHttpError) {
+    return {
+      metadata: { kind: "http", status: error.status },
+      retryable: error.status === 429 || error.status >= 500,
+    };
+  }
+  if (error instanceof HermesProtocolError) {
+    return { metadata: { kind: "protocol", code: error.name }, retryable: false };
+  }
+  if (error instanceof HermesTimeoutError) {
+    return { metadata: { kind: "timeout", code: error.name }, retryable: true };
+  }
+  return {
+    metadata: {
+      kind: "transport",
+      code: error instanceof Error ? error.name.slice(0, 64) : "UnknownError",
+    },
+    retryable: true,
+  };
+}
 
 function usage(): Usage {
   return {
@@ -155,11 +206,43 @@ function parseEvent(value: unknown): HermesEvent {
   return event;
 }
 
-async function* sseEvents(response: Response): AsyncGenerator<HermesEvent> {
-  if (!response.body) throw new Error("Hermes returned an SSE response with no body.");
+async function* sseEvents(
+  response: Response,
+  idleTimeoutMs: number,
+  signal: AbortSignal,
+): AsyncGenerator<HermesEvent> {
+  if (!response.body) throw new HermesProtocolError("Hermes returned an SSE response with no body.");
   let decoder = new TextDecoder();
   let buffer = "";
-  for await (let chunk of response.body) {
+  let reader = response.body.getReader();
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new HermesTimeoutError("Hermes SSE stream was idle too long.")),
+        idleTimeoutMs,
+      );
+    });
+    let abortListener: (() => void) | undefined;
+    let aborted = new Promise<never>((_resolve, reject) => {
+      abortListener = () => reject(
+        signal.reason instanceof Error ? signal.reason : new Error("Hermes stream aborted."),
+      );
+      if (signal.aborted) abortListener();
+      else signal.addEventListener("abort", abortListener, {once: true});
+    });
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      result = await Promise.race([reader.read(), timeout, aborted]);
+    } catch (error) {
+      await reader.cancel(error).catch(() => {});
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (abortListener) signal.removeEventListener("abort", abortListener);
+    }
+    if (result.done) break;
+    let chunk = result.value;
     buffer += decoder.decode(chunk, { stream: true }).replaceAll("\r\n", "\n");
     while (true) {
       let boundary = buffer.indexOf("\n\n");
@@ -171,7 +254,14 @@ async function* sseEvents(response: Response): AsyncGenerator<HermesEvent> {
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trimStart())
         .join("\n");
-      if (data) yield parseEvent(JSON.parse(data));
+      if (data) {
+        try {
+          yield parseEvent(JSON.parse(data));
+        } catch (error) {
+          if (error instanceof HermesProtocolError) throw error;
+          throw new HermesProtocolError("Hermes SSE data is not valid JSON.");
+        }
+      }
     }
   }
   buffer += decoder.decode();
@@ -180,19 +270,44 @@ async function* sseEvents(response: Response): AsyncGenerator<HermesEvent> {
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trimStart())
     .join("\n");
-  if (data) yield parseEvent(JSON.parse(data));
+  if (data) {
+    try {
+      yield parseEvent(JSON.parse(data));
+    } catch (error) {
+      if (error instanceof HermesProtocolError) throw error;
+      throw new HermesProtocolError("Hermes SSE data is not valid JSON.");
+    }
+  }
 }
 
 async function checkedFetch(
   fetcher: typeof globalThis.fetch,
   url: string,
   apiKey: string,
+  signal: AbortSignal,
+  timeoutMs: number,
   init?: RequestInit,
 ): Promise<Response> {
   let headers = new Headers(init?.headers);
   headers.set("Authorization", `Bearer ${apiKey}`);
   if (init?.body) headers.set("Content-Type", "application/json");
-  let response = await fetcher(url, { ...init, headers });
+  let timeoutController = new AbortController();
+  let timer = setTimeout(
+    () => timeoutController.abort(new HermesTimeoutError("Hermes request timed out.")),
+    timeoutMs,
+  );
+  let requestSignal = AbortSignal.any([signal, timeoutController.signal]);
+  let response: Response;
+  try {
+    response = await fetcher(url, { ...init, headers, signal: requestSignal });
+  } catch (error) {
+    if (timeoutController.signal.aborted) {
+      throw new HermesTimeoutError("Hermes request timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     let retryAfter = response.headers.get("Retry-After");
     let seconds = retryAfter === null ? undefined : Number(retryAfter);
@@ -221,7 +336,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
   let retryDeadline = Date.now() + 15 * 60_000;
   let retryAttempt = 0;
   let toolsByName = new Map(options.tools.map((tool) => [tool.name, tool]));
-  let lastSeq = 0;
+  let lastSeq = options.attachedTurn?.afterSeq ?? 0;
   let turnId = options.attachedTurn?.turnId;
   let eventsUrl = options.attachedTurn?.eventsUrl;
   let terminal = false;
@@ -235,6 +350,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
   let providerError: string | undefined;
   let sessionId = options.attachedTurn?.sessionId;
   let turnCapTimer: ReturnType<typeof setTimeout> | undefined;
+  let hardDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let hardDeadlineController = new AbortController();
+  let runSignal = hardDeadlineController.signal;
+  let requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+  let sseIdleTimeoutMs = options.sseIdleTimeoutMs ?? 90_000;
+  let random = options.random ?? Math.random;
   let currentUsage = usage();
   let deltasPosted = false;
   let partial: AssistantMessage = {
@@ -256,28 +377,39 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
     });
   };
 
-  let postJson = async (path: string, body: unknown) => {
-    await checkedFetch(fetcher, `${options.baseUrl}${path}`, options.apiKey, {
+  let postJson = async (path: string, body: unknown, signal = runSignal) => {
+    await checkedFetch(fetcher, `${options.baseUrl}${path}`, options.apiKey, signal,
+      requestTimeoutMs, {
       method: "POST",
       body: canonicalJson(body),
     });
   };
 
   let retryDelay = async (error: unknown) => {
-    if (error instanceof HermesProtocolError || Date.now() >= retryDeadline) throw error;
-    if (error instanceof HermesHttpError && error.status < 500 && error.status !== 429) throw error;
+    if (hardDeadlineController.signal.aborted) {
+      throw new HermesTimeoutError("Hermes turn exceeded its hard local deadline.");
+    }
+    let classification = classifyHermesFailure(error);
+    if (!classification.retryable || options.attachedTurn || Date.now() >= retryDeadline) {
+      throw error;
+    }
     let exponential = Math.min(30_000, 250 * 2 ** Math.min(retryAttempt++, 7));
-    await sleep(
-      error instanceof HermesHttpError && error.retryAfterMs !== undefined
-        ? Math.max(exponential, Math.min(error.retryAfterMs, 60_000))
-        : exponential,
-    );
+    let jittered = Math.max(1, Math.round(exponential * (0.5 + random())));
+    if (error instanceof HermesHttpError && error.retryAfterMs !== undefined) {
+      let minimum = Math.min(error.retryAfterMs, 60_000);
+      jittered = Math.max(jittered, minimum + Math.round(minimum * 0.25 * random()));
+    }
+    await sleep(jittered);
   };
 
-  let retryPostJson = async (path: string, body: unknown) => {
+  let retryPostJson = async (
+    path: string,
+    body: unknown,
+    signal = runSignal,
+  ) => {
     while (true) {
       try {
-        await postJson(path, body);
+        await postJson(path, body, signal);
         retryAttempt = 0;
         return;
       } catch (error) {
@@ -286,11 +418,11 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
     }
   };
 
-  let postDeltas = async (allowMissingSession: boolean) => {
-    if (deltasPosted) return;
+  let postDeltas = async (allowMissingSession: boolean): Promise<"ok" | "session_missing"> => {
+    if (deltasPosted) return "ok";
     for (let delta of options.workspaceDeltas ?? []) {
       try {
-        await retryPostJson(
+        await postJson(
           `/api/workshop/v1/sessions/${encodeURIComponent(options.workspaceId)}/` +
             `${encodeURIComponent(options.chatId)}/deltas`,
           {
@@ -302,24 +434,32 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
           },
         );
       } catch (error) {
-        if (!allowMissingSession || !(error instanceof HermesHttpError) || error.status !== 409) {
-          throw error;
+        if (error instanceof HermesHttpError && error.status === 409) {
+          if (!allowMissingSession) {
+            options.hooks.invalidateSession?.();
+            return "session_missing";
+          }
+        } else {
+          options.hooks.onDeltaFailure?.(classifyHermesFailure(error).metadata);
         }
       }
     }
     deltasPosted = true;
+    return "ok";
   };
 
   let sendControl = async (signal: "abort" | "end_turn", reason: string) => {
     if (!turnId || controlSent === "abort") return controlPromise;
     if (controlSent === signal) return controlPromise;
     controlSent = signal;
+    // Cancellation controls use an independent bounded signal: the user signal which requested
+    // the abort must not cancel the control request itself.
     controlPromise = retryPostJson(`/api/workshop/v1/turns/${encodeURIComponent(turnId)}/control`, {
       protocol_version: PROTOCOL_VERSION,
       signal,
       mode: signal === "abort" ? "immediate" : "after_current_call",
       reason,
-    });
+    }, new AbortController().signal);
     await controlPromise;
   };
 
@@ -327,14 +467,27 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
     void sendControl("abort", "user_cancelled").catch(() => {});
   };
   options.signal.addEventListener("abort", abortListener, { once: true });
+  hardDeadlineTimer = setTimeout(
+    () => hardDeadlineController.abort(
+      new HermesTimeoutError("Hermes turn exceeded its hard local deadline."),
+    ),
+    (options.turnTimeoutMs ?? 15 * 60_000) + (options.hardDeadlineGraceMs ?? 60_000),
+  );
 
   let startResponse: Response | undefined;
 
   try {
     // An established session must observe replay-derived workspace state before it accepts the
     // dependent user turn. A first turn has no remote session to update yet, so it posts after
-    // turn.started and treats a concurrent 409 as a stable-id retry on the next user turn.
-    if (!options.attachedTurn && options.sessionEstablished) await postDeltas(false);
+    // turn.started. A stale established-session 409 clears the local epoch and follows that same
+    // post-start path for the replacement session.
+    let sessionEstablished = options.sessionEstablished ?? false;
+    if (!options.attachedTurn && sessionEstablished) {
+      if (await postDeltas(false) === "session_missing") {
+        sessionEstablished = false;
+        deltasPosted = false;
+      }
+    }
     while (!terminal) {
       let progressed = false;
       try {
@@ -345,6 +498,8 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
             fetcher,
             `${options.baseUrl}/api/workshop/v1/turns`,
             options.apiKey,
+            runSignal,
+            requestTimeoutMs,
             {
               method: "POST",
               body: canonicalJson(makeHermesTurnRequest(options)),
@@ -360,10 +515,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                   `${encodeURIComponent(turnId)}/events`,
               );
           url.searchParams.set("after_seq", `${lastSeq}`);
-          response = await checkedFetch(fetcher, url.toString(), options.apiKey);
+          response = await checkedFetch(
+            fetcher, url.toString(), options.apiKey, runSignal, requestTimeoutMs,
+          );
         }
 
-        for await (let event of sseEvents(response)) {
+        for await (let event of sseEvents(response, sseIdleTimeoutMs, runSignal)) {
           if (event.seq <= lastSeq) continue;
           progressed = true;
           lastSeq = event.seq;
@@ -385,7 +542,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 },
                 options.turnTimeoutMs ?? 15 * 60_000,
               );
-              if (!options.sessionEstablished) await postDeltas(true);
+              if (!sessionEstablished) await postDeltas(true);
               if (options.signal.aborted) await sendControl("abort", "user_cancelled");
               break;
             case "message.start":
@@ -405,7 +562,9 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 partial.content.push({ type: "text", text: "" });
               }
               let block = partial.content[textIndex];
-              if (block?.type !== "text") throw new Error("Invalid Hermes text projection state.");
+              if (block?.type !== "text") {
+                throw new HermesProtocolError("Invalid Hermes text projection state.");
+              }
               block.text += delta;
               await emitUpdate({
                 type: "text_delta",
@@ -423,7 +582,7 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               }
               let block = partial.content[thinkingIndex];
               if (block?.type !== "thinking") {
-                throw new Error("Invalid Hermes thinking projection state.");
+                throw new HermesProtocolError("Invalid Hermes thinking projection state.");
               }
               block.thinking += delta;
               await emitUpdate({
@@ -437,6 +596,10 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
             case "tool_call.start": {
               let callId = requireString(event, "call_id");
               let name = requireString(event, "name");
+              let prior = calls.get(callId);
+              if (prior && prior.name !== name) {
+                throw new HermesProtocolError("Hermes reused a call id with a different tool.");
+              }
               if (!calls.has(callId)) {
                 let index = partial.content.length;
                 partial.content.push({ type: "toolCall", id: callId, name, arguments: {} });
@@ -453,7 +616,11 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               let callId = requireString(event, "call_id");
               let delta = requireString(event, "delta");
               let call = calls.get(callId);
-              if (!call) throw new Error(`Hermes sent arguments for unknown call ${callId}.`);
+              if (!call) {
+                throw new HermesProtocolError(
+                  `Hermes sent arguments for unknown call ${callId}.`,
+                );
+              }
               call.argumentsText += delta;
               await emitUpdate({
                 type: "toolcall_delta",
@@ -466,17 +633,17 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
             case "tool_call.end": {
               let callId = requireString(event, "call_id");
               let call = calls.get(callId);
-              if (!call) throw new Error(`Hermes ended unknown call ${callId}.`);
+              if (!call) throw new HermesProtocolError(`Hermes ended unknown call ${callId}.`);
               if (
                 !event.arguments ||
                 typeof event.arguments !== "object" ||
                 Array.isArray(event.arguments)
               ) {
-                throw new Error(`Hermes call ${callId} has invalid arguments.`);
+                throw new HermesProtocolError(`Hermes call ${callId} has invalid arguments.`);
               }
               let block = partial.content[call.index];
               if (block?.type !== "toolCall")
-                throw new Error("Invalid Hermes tool projection state.");
+                throw new HermesProtocolError("Invalid Hermes tool projection state.");
               block.arguments = event.arguments as Record<string, unknown>;
               await emitUpdate({
                 type: "toolcall_end",
@@ -485,7 +652,10 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 partial: { ...partial },
               });
 
-              let claim = await options.hooks.claimToolCall(turnId, callId, call.name);
+              if (!sessionId) throw new HermesProtocolError("Hermes tool call has no session id.");
+              let claim = await options.hooks.claimToolCall(
+                turnId, callId, call.name, sessionId,
+              );
               let stored: HermesToolResult;
               if (claim.execute) {
                 let tool = toolsByName.get(call.name);
@@ -614,11 +784,16 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
                 await options.hooks.emit({ type: "message_start", message: { ...partial } });
               }
               await options.hooks.emit({ type: "message_end", message: partial });
-              await options.hooks.emit({
+              let terminalEvent = {
                 type: "turn_end",
                 message: partial,
                 toolResults: [...toolResults.values()],
-              });
+              } satisfies AgentEvent;
+              if (options.hooks.emitTerminal) {
+                await options.hooks.emitTerminal(event.turn_id, event.seq, terminalEvent);
+              } else {
+                await options.hooks.emit(terminalEvent);
+              }
               options.hooks.onTerminalProjected?.(event.turn_id, event.seq);
               terminal = true;
               break;
@@ -634,11 +809,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
         continue;
       }
       if (!terminal && !progressed) {
-        await sleep(100);
+        await sleep(Math.max(1, Math.round(100 * (0.5 + random()))));
       }
     }
   } finally {
     if (turnCapTimer !== undefined) clearTimeout(turnCapTimer);
+    if (hardDeadlineTimer !== undefined) clearTimeout(hardDeadlineTimer);
     options.signal.removeEventListener("abort", abortListener);
   }
 }

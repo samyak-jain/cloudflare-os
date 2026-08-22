@@ -300,14 +300,27 @@ export interface AgentHooks {
   /** Record Hermes's session epoch and clear turn-local projection state on an epoch change. */
   recordHermesTurnStarted(chatId: number, turnId: string, sessionId: string): void;
 
+  /** Clear a stale established-session binding after Hermes rejects a delta with 409. */
+  invalidateHermesSession(chatId: number): void;
+
   /** Record that Hermes's terminal event crossed the shared event sink. */
   recordHermesTerminal(chatId: number, turnId: string, sequence: number): void;
+
+  /** Atomically append a terminal assistant step and advance its wake projection cursor. */
+  commitHermesTerminalProjection(
+    chatId: number, turnId: string, sequence: number, author: AiChatAuthorInfo,
+    msgs: AiChatMessageBodyWithModelData[], totalTokens: number,
+    aiGatewayLogId: string | undefined, aiGatewayLogRoute: AiGatewayLogRoute | undefined,
+    estimatedCost: number,
+  ): boolean;
 
   /** Clear a wake attachment only after its terminal event crossed the persistence barrier. */
   completeHermesAttachedTurn(chatId: number, turnId: string): void;
 
   /** Durably claim and resolve a `(turn_id, call_id)` execution before/after local work. */
-  claimHermesToolCall(chatId: number, turnId: string, callId: string, toolName: string):
+  claimHermesToolCall(
+    chatId: number, turnId: string, callId: string, toolName: string, sessionId: string,
+  ):
       Promise<{execute: true} | {execute: false, result: HermesToolResult}>;
   resolveHermesToolCall(turnId: string, callId: string, result: HermesToolResult): void;
 
@@ -2816,6 +2829,7 @@ export async function runAgent(
   }
 
   let toolList = Object.values(tools);
+  let pendingHermesAttachment = handle.hermes ? hooks.getHermesAttachedTurn(chatId) : undefined;
 
   // Records a turn that ended with a provider error, so it can be rethrown for the overseer's
   // error triage after the loop settles. (pi never throws for provider failures; the loop
@@ -2827,7 +2841,10 @@ export async function runAgent(
   let turnCount = 0;
 
   // The awaited event sink driving both the client stream fan-out and the persistence barrier.
-  let emit = async (event: AgentEvent): Promise<void> => {
+  let emit = async (
+    event: AgentEvent,
+    hermesTerminal?: {turnId: string; sequence: number},
+  ): Promise<void> => {
     switch (event.type) {
       case "message_update": {
         // Live streaming fan-out to connected clients.
@@ -2985,9 +3002,20 @@ export async function runAgent(
           msgs.push(cr);
         }
 
-        hooks.addChatMessages(chatId, author, msgs, message.usage.totalTokens,
-            handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute,
-            message.usage.cost.total);
+        if (hermesTerminal && pendingHermesAttachment) {
+          hooks.commitHermesTerminalProjection(
+            chatId, hermesTerminal.turnId, hermesTerminal.sequence, author, msgs,
+            message.usage.totalTokens, handle.lastResponse?.aiGatewayLogId,
+            handle.aiGatewayLogRoute, message.usage.cost.total,
+          );
+        } else {
+          hooks.addChatMessages(chatId, author, msgs, message.usage.totalTokens,
+              handle.lastResponse?.aiGatewayLogId, handle.aiGatewayLogRoute,
+              message.usage.cost.total);
+          if (hermesTerminal) {
+            hooks.recordHermesTerminal(chatId, hermesTerminal.turnId, hermesTerminal.sequence);
+          }
+        }
 
         // Reset per-step streaming state.
         toolCallNotes.clear();
@@ -2998,7 +3026,6 @@ export async function runAgent(
   };
 
   try {
-    let pendingHermesAttachment = handle.hermes ? hooks.getHermesAttachedTurn(chatId) : undefined;
     if (modelMessages.length === 0 ||
         (modelMessages[modelMessages.length - 1].role === "assistant" &&
          !pendingHermesAttachment)) {
@@ -3035,13 +3062,22 @@ export async function runAgent(
           sessionEstablished: hooks.getHermesSessionId(chatId) !== undefined,
           workspaceDeltas: hermesWorkspaceDeltas,
           hooks: {
-            emit,
-            claimToolCall: (turnId, callId, toolName) =>
-              hooks.claimHermesToolCall(chatId, turnId, callId, toolName),
+            emit: event => emit(event),
+            emitTerminal: (turnId, sequence, event) =>
+              emit(event, {turnId, sequence}),
+            claimToolCall: (turnId, callId, toolName, sessionId) =>
+              hooks.claimHermesToolCall(chatId, turnId, callId, toolName, sessionId),
             resolveToolCall: (turnId, callId, result) =>
               hooks.resolveHermesToolCall(turnId, callId, result),
             onTurnStarted: (turnId, sessionId) =>
               hooks.recordHermesTurnStarted(chatId, turnId, sessionId),
+            invalidateSession: () => hooks.invalidateHermesSession(chatId),
+            onDeltaFailure: failure => logger.warn("Hermes workspace delta was not accepted", {
+              event: "hermes.workspace_delta.failed",
+              chatId,
+              statusCode: failure.status,
+              statusText: failure.kind,
+            }),
             onTerminalProjected: attachedTurn
               ? (turnId, sequence) => {
                   hooks.recordHermesTerminal(chatId, turnId, sequence);
@@ -3063,7 +3099,7 @@ export async function runAgent(
           },
         });
       } catch (error) {
-        if (error instanceof HermesHttpError) {
+        if (error instanceof HermesHttpError && !attachedTurn) {
           throw new AgentTurnError(error.message, error.status);
         }
         throw error;

@@ -3,6 +3,7 @@ import type { HermesToolResult } from "./hermes-driver";
 /** Durable state for one Hermes `(turn_id, call_id)` local execution. */
 export type HermesToolCallRecord = {
   chatId: number;
+  sessionId: string;
   turnId: string;
   callId: string;
   toolName: string;
@@ -44,6 +45,7 @@ export class HermesToolCallStateMachine {
   /** Claim before execution, await a racing same-instance call, or return a durable result. */
   async claim(
     chatId: number,
+    sessionId: string,
     turnId: string,
     callId: string,
     toolName: string,
@@ -72,7 +74,7 @@ export class HermesToolCallStateMachine {
 
     let resolvers = Promise.withResolvers<HermesToolResult>();
     this.#active.set(key, resolvers);
-    this.records.put({ chatId, turnId, callId, toolName, state: "executing" });
+    this.records.put({ chatId, sessionId, turnId, callId, toolName, state: "executing" });
     return { execute: true };
   }
 

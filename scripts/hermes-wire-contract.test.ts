@@ -18,11 +18,14 @@ function findWorkshopPlatform(): string | undefined {
 }
 
 describe("Hermes Workshop wire contract", () => {
-  it("is accepted by the actual WorkshopTurnRequest.from_dict parser", (t) => {
+  it("is accepted by the actual WorkshopTurnRequest.from_dict parser", () => {
     let platform = findWorkshopPlatform();
     if (!platform) {
-      t.skip("workshop-platform worktree is not available");
-      return;
+      if (process.env.HERMES_CONTRACT_SKIP === "1") return;
+      throw new Error(
+        "workshop-platform worktree is required; set HERMES_CONTRACT_SKIP=1 only for an " +
+        "explicit local opt-out.",
+      );
     }
     let tools = Object.values(WORKSHOP_AGENT_TOOL_DEFINITIONS).map((definition) => ({
       ...definition,

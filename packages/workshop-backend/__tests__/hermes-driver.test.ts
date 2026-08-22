@@ -198,8 +198,9 @@ describe("Hermes remote driver", () => {
       sleep: async (milliseconds) => {
         delays.push(milliseconds);
       },
+      random: () => 0.5,
     });
-    expect(delays).toEqual([250, 2000]);
+    expect(delays).toEqual([250, 2250]);
     expect(server.reconnectAfter).toEqual(["2", "2", "2"]);
   });
 
@@ -224,22 +225,18 @@ describe("Hermes remote driver", () => {
       if (requests === 1) {
         expect(url.pathname).toBe("/api/workshop/v1/turns/turn-1/events");
         expect(url.searchParams.get("after_seq")).toBe("0");
-        let response = new Response();
-        Object.defineProperty(response, "body", {
-          value: {
-            async *[Symbol.asyncIterator]() {
-              yield new TextEncoder().encode(initialFrames);
-              throw new Error("socket reset");
-            },
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(initialFrames));
+            controller.error(new Error("socket reset"));
           },
-        });
-        return response;
+        }));
       }
-      expect(url.searchParams.get("after_seq")).toBe("3");
-      return sse(terminalEvents().slice(3));
+      expect(url.searchParams.get("after_seq")).toBe("0");
+      return sse(terminalEvents());
     };
     let run = harness(new FakeHermesServer([]));
-    await runHermesTurn({
+    let options = {
       baseUrl: "https://hermes.test",
       apiKey: "a".repeat(64),
       workspaceId: "workspace-1",
@@ -252,12 +249,17 @@ describe("Hermes remote driver", () => {
         sessionId: "session-1",
         eventsUrl: "https://hermes.test/api/workshop/v1/turns/turn-1/events",
         idempotencyKey: "wake-1",
+        afterSeq: 0,
       },
       signal: new AbortController().signal,
       hooks: run.hooks,
       fetch: fetcher,
       sleep: async () => {},
-    });
+    } satisfies Parameters<typeof runHermesTurn>[0];
+    await expect(runHermesTurn(options)).rejects.toThrow("socket reset");
+    // The Overseer requeues the durable attachment and invokes a fresh driver. Its explicit
+    // committed cursor is zero because no terminal projection crossed the barrier yet.
+    await runHermesTurn(options);
     expect(requests).toBe(2);
   });
 
@@ -310,7 +312,7 @@ describe("Hermes remote driver", () => {
       },
     };
     let crashed = new HermesToolCallStateMachine(records);
-    await crashed.claim(7, "turn-1", "call-1", "createGadget");
+    await crashed.claim(7, "session-1", "turn-1", "call-1", "createGadget");
     let mutations = new Map<string, string>();
     mutations.set("hermes:turn-1:call-1", "gadget-17");
 
@@ -347,7 +349,8 @@ describe("Hermes remote driver", () => {
       { seq: 4, event: "turn.end", status: "completed", stop_reason: "stop" },
     ]);
     let run = harness(server, {
-      claimToolCall: (turnId, callId, name) => restarted.claim(7, turnId, callId, name),
+      claimToolCall: (turnId, callId, name, sessionId) =>
+        restarted.claim(7, sessionId, turnId, callId, name),
       resolveToolCall: (turnId, callId, result) => restarted.resolve(turnId, callId, result),
     });
     await runHermesTurn({
@@ -528,6 +531,120 @@ describe("Hermes remote driver", () => {
       "/api/workshop/v1/sessions/workspace-1/7/deltas",
       "/api/workshop/v1/turns",
     ]);
+  });
+
+  it("invalidates a stale session on delta 409 and establishes a replacement turn", async () => {
+    let server = new FakeHermesServer(terminalEvents(), [], "session-replacement");
+    server.deltaStatus = 409;
+    let invalidations = 0;
+    let run = harness(server, {invalidateSession: () => invalidations++});
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "replace-session",
+      inputText: "continue",
+      tools: [],
+      sessionEstablished: true,
+      workspaceDeltas: [{deltaId: "delta-1", payload: {type: "user_changes"}}],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+    expect(invalidations).toBe(1);
+    expect(server.requests.map(request => request.url.pathname)).toEqual([
+      "/api/workshop/v1/sessions/workspace-1/7/deltas",
+      "/api/workshop/v1/turns",
+      "/api/workshop/v1/sessions/workspace-1/7/deltas",
+    ]);
+    expect(run.sessions).toEqual(["session-replacement"]);
+  });
+
+  it("logs a failed non-409 delta and does not block the dependent turn", async () => {
+    let server = new FakeHermesServer(terminalEvents());
+    server.deltaStatus = 503;
+    let failures: unknown[] = [];
+    let run = harness(server, {onDeltaFailure: failure => failures.push(failure)});
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "delta-failure",
+      inputText: "continue",
+      tools: [],
+      sessionEstablished: true,
+      workspaceDeltas: [{deltaId: "delta-1", payload: {type: "user_changes"}}],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+      requestTimeoutMs: 10,
+    });
+    expect(failures).toEqual([{kind: "http", status: 503}]);
+    expect(server.requests.map(request => request.url.pathname)).toEqual([
+      "/api/workshop/v1/sessions/workspace-1/7/deltas",
+      "/api/workshop/v1/turns",
+    ]);
+  });
+
+  it("bounds a silent SSE with the idle timeout", async () => {
+    let run = harness(new FakeHermesServer([]));
+    await expect(runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "idle",
+      inputText: "wait",
+      tools: [],
+      attachedTurn: {
+        turnId: "turn-idle", sessionId: "session-1", idempotencyKey: "wake-idle",
+        eventsUrl: "https://hermes.test/api/workshop/v1/turns/turn-idle/events", afterSeq: 4,
+      },
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: async () => new Response(new ReadableStream({start() {}})),
+      sseIdleTimeoutMs: 5,
+      requestTimeoutMs: 10,
+    })).rejects.toThrow("idle too long");
+  });
+
+  it("enforces the hard local turn deadline even when Hermes ignores end_turn", async () => {
+    let encoder = new TextEncoder();
+    let run = harness(new FakeHermesServer([]));
+    let fetcher: typeof fetch = async (input, init) => {
+      let request = new Request(input, init);
+      if (new URL(request.url).pathname.endsWith("/control")) return Response.json({ok: true});
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            protocol_version: 1, turn_id: "turn-hard", session_id: "session-1",
+            seq: 1, event: "turn.started", timestamp: 1,
+          })}\n\n`));
+        },
+      }));
+    };
+    await expect(runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "hard-deadline",
+      inputText: "wait",
+      tools: [],
+      attachedTurn: {
+        turnId: "turn-hard", sessionId: "session-1", idempotencyKey: "wake-hard",
+        eventsUrl: "https://hermes.test/api/workshop/v1/turns/turn-hard/events", afterSeq: 0,
+      },
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: fetcher,
+      turnTimeoutMs: 5,
+      hardDeadlineGraceMs: 5,
+      sseIdleTimeoutMs: 1_000,
+      requestTimeoutMs: 20,
+    })).rejects.toThrow("hard local deadline");
   });
 
   it("maps user cancellation to immediate abort control", async () => {
