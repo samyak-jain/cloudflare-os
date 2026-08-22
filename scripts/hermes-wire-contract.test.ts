@@ -58,7 +58,7 @@ describe("Hermes Workshop wire contract", () => {
     );
     assert.equal(python.status, 0, python.stderr);
     let parsed = JSON.parse(python.stdout) as { tools: number; digest: string };
-    assert.equal(parsed.tools, 13);
+    assert.equal(parsed.tools, 14);
     assert.match(parsed.digest, /^[0-9a-f]{64}$/);
   });
 });

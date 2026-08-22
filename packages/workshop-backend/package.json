@@ -21,6 +21,8 @@
     "@gadgets/error-reporting": "workspace:*",
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
+    "acorn": "^8.18.0",
+    "acorn-jsx": "^5.3.2",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
     "diff": "^8.0.4",
