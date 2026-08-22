@@ -10,11 +10,11 @@ interprets a bounded expression grammar over static JSON, and sends only a valid
 literal, a `{"$bind": "path"}` marker, or JSON built from those. Model-authored JavaScript is
 never executed. The parent first validates the complete AST, including unselected conditional
 branches, then interprets only literals, catalog JSX, scoped static-data reads, finite `.map`, pure
-conditionals/comparisons, and bounded string building. Imports and every non-whitelisted construct
-are structural errors. After interpretation, the backend independently re-validates and
-reconstructs component names, prop schemas, bindings, JSON shape, node budget, and byte budget
-before persistence. The client validates again so old or future durable rows degrade safely, but
-does not replace backend checks.
+conditionals/comparisons, bounded numeric arithmetic, and bounded string building. Imports and
+every non-whitelisted construct are structural errors. After interpretation, the backend
+independently re-validates and reconstructs component names, prop schemas, bindings, JSON shape,
+node budget, and byte budget before persistence. The client validates again so old or future
+durable rows degrade safely, but does not replace backend checks.
 
 ## Why interpretation terminates
 
@@ -23,6 +23,12 @@ or recursion. Its sole arrow form is a concise callback directly attached to `.m
 iteration ranges over an already-materialized array from a literal, static `data`, or another
 allowed expression. Bound `state` is not in the identifier environment and `bind()` produces only
 a leaf marker, so runtime form data cannot become a collection program.
+
+Arithmetic (`+ - * / %` and unary `-`) adds no evaluation edges: each operator evaluates its two
+already-bounded operands once and must produce a finite number. `+` also performs bounded string
+concatenation when either operand is a string. Per-row binding paths such as
+``bind(`rows.${index}.value`)`` are evaluated from static map scope while the tree is generated;
+they do not expose bound state to the interpreter.
 
 Finite input therefore implies finite evaluation. Hard limits make that argument operational and
 fail closed: 64 KiB each for source and static data, 20,000 AST nodes, 100,000 expression

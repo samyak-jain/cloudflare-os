@@ -306,7 +306,7 @@ function enterSyntax(source: string, node: AstNode, depth: number, budget: Synta
 function rejectAst(source: string, node: AstNode, context: string): never {
   throw syntaxError(source, node.start, node.type + " is not allowed in " + context +
       ". Allowed syntax is bounded catalog JSX expressions over data, literals, .map(), " +
-      "conditionals, pure member reads, string building, and bind(\"path\").");
+      "conditionals, arithmetic, pure member reads, string building, and bind(path).");
 }
 
 function literalValue(source: string, node: AstNode): JsonValue {
@@ -551,7 +551,8 @@ function validateExpressionAst(
           scope, depth + 1, budget, allowBind, 0);
       return;
     case "BinaryExpression":
-      if (!["+", "===", "!==", "<", ">", "<=", ">="].includes(String(node.operator))) {
+      if (!["+", "-", "*", "/", "%", "===", "!==", "<", ">", "<=", ">="].includes(
+          String(node.operator))) {
         rejectAst(source, node, "a binary expression");
       }
       validateExpressionAst(source, astNode(source, node.left, node, "left"),
@@ -561,10 +562,7 @@ function validateExpressionAst(
       return;
     case "UnaryExpression": {
       let argument = astNode(source, node.argument, node, "argument");
-      if (node.operator !== "-" || argument.type !== "Literal" ||
-          typeof argument.value !== "number" || !Number.isFinite(argument.value)) {
-        rejectAst(source, node, "a numeric literal");
-      }
+      if (node.operator !== "-") rejectAst(source, node, "numeric negation");
       validateExpressionAst(source, argument, scope, depth + 1, budget, false, 0);
       return;
     }
@@ -595,12 +593,11 @@ function validateExpressionAst(
         let callee = astNode(source, node.callee, node, "callee");
         enterSyntax(source, callee, depth + 1, budget);
         let args = astNodes(source, node.arguments, node, "arguments");
-        if (node.optional === true || args.length !== 1 || args[0].type !== "Literal" ||
-            typeof args[0].value !== "string" || args[0].value.length === 0) {
+        if (node.optional === true || args.length !== 1 || args[0].type === "SpreadElement") {
           throw syntaxError(source, node.start,
-              "bind() requires exactly one non-empty string literal path.");
+              "bind() requires exactly one string path expression.");
         }
-        enterSyntax(source, args[0], depth + 1, budget);
+        validateExpressionAst(source, args[0], scope, depth + 1, budget, false, 0);
         return;
       }
       if (isMapCall(source, node)) {
@@ -649,6 +646,21 @@ function scalarString(context: EvaluationContext, node: AstNode, value: RuntimeV
   }
   throw syntaxError(context.source, node.start,
       "string interpolation accepts only string, number, boolean, or null values.");
+}
+
+function numericBinaryResult(
+    context: EvaluationContext, node: AstNode, left: RuntimeValue, right: RuntimeValue,
+    operation: (left: number, right: number) => number): number {
+  if (typeof left !== "number" || typeof right !== "number") {
+    throw syntaxError(context.source, node.start,
+        node.operator + " requires two numeric operands.");
+  }
+  let result = operation(left, right);
+  if (!Number.isFinite(result)) {
+    throw syntaxError(context.source, node.start,
+        node.operator + " must produce a finite number.");
+  }
+  return result;
 }
 
 function readMember(
@@ -781,12 +793,28 @@ function evaluateExpression(
           astNode(context.source, node.right, node, "right"), depth + 1, false);
       switch (node.operator) {
         case "+":
+          if (typeof left === "number" && typeof right === "number") {
+            return numericBinaryResult(context, node, left, right,
+                (leftNumber, rightNumber) => leftNumber + rightNumber);
+          }
           if (typeof left !== "string" && typeof right !== "string") {
             throw syntaxError(context.source, node.start,
-                "+ is string concatenation only; at least one operand must be a string.");
+                "+ requires two numbers or at least one string operand.");
           }
           return boundedString(context, node,
               scalarString(context, node, left) + scalarString(context, node, right));
+        case "-":
+          return numericBinaryResult(context, node, left, right,
+              (leftNumber, rightNumber) => leftNumber - rightNumber);
+        case "*":
+          return numericBinaryResult(context, node, left, right,
+              (leftNumber, rightNumber) => leftNumber * rightNumber);
+        case "/":
+          return numericBinaryResult(context, node, left, right,
+              (leftNumber, rightNumber) => leftNumber / rightNumber);
+        case "%":
+          return numericBinaryResult(context, node, left, right,
+              (leftNumber, rightNumber) => leftNumber % rightNumber);
         case "===": return left === right;
         case "!==": return left !== right;
         case "<":
@@ -814,7 +842,9 @@ function evaluateExpression(
     case "UnaryExpression": {
       let value = evaluateExpression(context,
           astNode(context.source, node.argument, node, "argument"), depth + 1, false);
-      if (typeof value !== "number") return rejectAst(context.source, node, "a numeric literal");
+      if (typeof value !== "number") {
+        throw syntaxError(context.source, node.start, "unary - requires a numeric operand.");
+      }
       return -value;
     }
     case "MemberExpression": {
@@ -844,7 +874,12 @@ function evaluateExpression(
     case "CallExpression":
       if (isBindCall(context.source, node) && allowBind) {
         let argument = astNodes(context.source, node.arguments, node, "arguments")[0];
-        return {$bind: String(argument.value)};
+        let statePath = evaluateExpression(context, argument, depth + 1, false);
+        if (typeof statePath !== "string" || statePath.length === 0) {
+          throw syntaxError(context.source, node.start,
+              "bind() path must evaluate to a non-empty string.");
+        }
+        return {$bind: statePath};
       }
       if (isMapCall(context.source, node)) return evaluateMap(context, node, depth);
       return rejectAst(context.source, node, "a call expression");
@@ -949,7 +984,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function assertJsonValue(value: unknown, path: string, depth = 0): asserts value is JsonValue {
+function assertJsonValue(
+    value: unknown, path: string, depth = 0, rejectBindKeys = false): asserts value is JsonValue {
   if (depth > MAX_RENDER_UI_DEPTH) throw new Error(`${path} exceeds the maximum nesting depth.`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") {
@@ -959,16 +995,19 @@ function assertJsonValue(value: unknown, path: string, depth = 0): asserts value
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index++) {
       if (!Object.hasOwn(value, index)) throw new Error(`${path}[${index}] is missing.`);
-      assertJsonValue(value[index], `${path}[${index}]`, depth + 1);
+      assertJsonValue(value[index], `${path}[${index}]`, depth + 1, rejectBindKeys);
     }
     return;
   }
   if (!isPlainRecord(value)) throw new Error(`${path} is not JSON.`);
   for (let [key, child] of Object.entries(value)) {
+    if (rejectBindKeys && key === "$bind") {
+      throw new Error(`${path} contains reserved key $bind; use bind(path) in JSX instead.`);
+    }
     if (BLOCKED_JSON_KEYS.has(key)) {
       throw new Error(`${path} contains forbidden key ${key}.`);
     }
-    assertJsonValue(child, `${path}.${key}`, depth + 1);
+    assertJsonValue(child, `${path}.${key}`, depth + 1, rejectBindKeys);
   }
 }
 
@@ -1168,7 +1207,7 @@ export async function parseRenderUIJsx(
   if (!jsxSource.trim()) throw new Error("renderUI JSX cannot be empty.");
   assertJsonValue(stateDefaults, "state");
   let trustedData = structuredClone(data);
-  assertJsonValue(trustedData, "data");
+  assertJsonValue(trustedData, "data", 0, true);
   if (sourceByteLength(JSON.stringify(trustedData)) > MAX_RENDER_UI_DATA_BYTES) {
     throw new Error(`renderUI data exceeds the ${MAX_RENDER_UI_DATA_BYTES}-byte limit.`);
   }

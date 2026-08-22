@@ -7,11 +7,13 @@ teach the model.
 
 Conventions used throughout:
 
-- **`bind("dot.path")`** — this is the only runtime-binding call, and only for props
+- **`bind(path)`** — this is the only runtime-binding call, and only for props
   marked *bindable*. The interpreter converts it to the wire marker `{ "$bind": "dot.path" }`;
-  writing that object directly in JSX is rejected. The path addresses `stateDefaults` as a
-  plain object tree; array indices are numeric segments (`tags.0`). A control whose value prop
-  is not bound renders read-only, because there is nowhere for its edits to go.
+  writing that object directly in JSX or supplying it through `data` is rejected. The path must
+  evaluate to a non-empty string from literals, static `data`, or `.map` locals. It addresses
+  `stateDefaults` as a plain object tree; array indices are numeric segments (`tags.0`). This makes
+  per-row controls possible with ``bind(`rows.${index}.value`)``. A control whose value prop is
+  not bound renders read-only, because there is nowhere for its edits to go.
 - **JSX is an interpreted expression language, not JavaScript.** The backend parses the entire
   source and evaluates a fixed, bounded AST grammar. Nothing is compiled or executed.
 - **`data` is the only top-level identifier.** It refers to the optional static JSON supplied with
@@ -20,8 +22,11 @@ Conventions used throughout:
 - **Allowed expressions** are JSON literals (including arrays/objects and negative numbers),
   catalog JSX, pure `item.name` / `item[0]` / `array.length` reads, direct
   `array.map((item, index) => expression)`, ternary and `&&` / `||` conditionals,
-  `=== !== < > <= >=`, template strings, and string `+`. The only other call is the exact
-  `bind("literal.path")` form in a bindable prop.
+  `=== !== < > <= >=`, numeric `+ - * / %`, unary `-`, template strings, and string `+`. The only
+  other call is `bind(path)` in a bindable prop. Arithmetic operands must be numbers; `+` adds two
+  numbers and concatenates when either operand is a string. Use a template for mixed row labels:
+  `` `#${index + 1}` `` is `"#1"`, while `"#" + index + 1` follows left associativity and is
+  `"#01"` for index zero.
 - **Everything else is rejected structurally in every branch.** That includes imports, ordinary
   or member calls, arrows outside direct `.map`, block-bodied callbacks, declarations, loops,
   assignments, updates, `new`, spreads, tagged templates, sequence expressions, optional access,
@@ -37,9 +42,10 @@ For repeated data, send the array once and map it into a static prop value:
 
 ```jsx
 <Table
-  columns={["name", {key: "score", label: "Score", align: "right"}]}
+  columns={["row", "name", {key: "score", label: "Score", align: "right"}]}
   rows={data.rows.map((row, index) => ({
-    name: `${index + ": "}${row.name}`,
+    row: index + 1,
+    name: row.name,
     score: row.score,
   }))}
 />
@@ -48,6 +54,19 @@ For repeated data, send the array once and map it into a static prop value:
 with `data: {rows: [{name: "Ada", score: 12}]}`. `.map` runs only while the durable tree is being
 generated. It can range over literal/static `data` arrays or arrays produced by another allowed
 expression, never over runtime bound `state`. A row per bound-state item is out of scope for v1.
+
+Mapped controls may derive distinct paths from the same static callback scope:
+
+```jsx
+<Stack>
+  {data.rows.map((row, index) =>
+    <Input label={row.name} value={bind(`rows.${index}.value`)} />)}
+</Stack>
+```
+
+The matching `state` is `{rows: [{value: "..."}, ...]}`. This does not make bound state iterable:
+the map still ranges only over static `data`; the generated path is a leaf marker in the durable
+tree.
 
 ## Expression limits
 

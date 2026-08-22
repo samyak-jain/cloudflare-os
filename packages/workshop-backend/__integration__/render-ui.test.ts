@@ -196,6 +196,73 @@ describe("bounded renderUI expression interpreter", () => {
     ]);
   });
 
+  it("supports bounded numeric arithmetic and one-based map row numbers", async () => {
+    let result = await parseRenderUIJsx(`<Stack>
+      <Table columns={["row", "total", "net", "unit", "remainder", "negated"]}
+        rows={data.rows.map((item, index) => ({
+          row: index + 1,
+          total: item.price * item.qty,
+          net: item.price - item.discount,
+          unit: item.total / item.qty,
+          remainder: item.total % item.qty,
+          negated: -item.delta,
+        }))} />
+      <ProgressBar value={(data.done / data.total) * 100} />
+    </Stack>`, {}, {
+      rows: [{price: 12, qty: 3, discount: 2, total: 38, delta: 4}],
+      done: 3,
+      total: 4,
+    });
+
+    expect(result.tree.children).toMatchObject([{
+      type: "Table",
+      props: {rows: [{row: 1, total: 36, net: 10, unit: 38 / 3, remainder: 2, negated: -4}]},
+    }, {type: "ProgressBar", props: {value: 75}}]);
+  });
+
+  it("rejects non-numeric arithmetic operands and non-finite results", async () => {
+    await expect(parseRenderUIJsx(`<Text>{data.value - 1}</Text>`, {}, {value: "2"}))
+        .rejects.toThrow(/requires two numeric operands/);
+    await expect(parseRenderUIJsx(`<ProgressBar value={1 / 0} />`))
+        .rejects.toThrow(/must produce a finite number/);
+  });
+
+  it("keeps standard + associativity and supports clear template row labels", async () => {
+    let result = await parseRenderUIJsx(`<Stack>{data.map((item, index) => <Row>
+      <Text label={"#" + index + 1} />
+      <Text label={\`#\${index + 1}\`} />
+      <Badge tone={item.active ? "success" : "warning"}>{item.name}</Badge>
+    </Row>)}</Stack>`, {}, [{name: "Ada", active: true}]);
+
+    expect(result.tree.children).toMatchObject([{
+      type: "Row",
+      children: [
+        {type: "Text", props: {label: "#01"}},
+        {type: "Text", props: {label: "#1"}},
+        {type: "Badge", props: {tone: "success"}, children: ["Ada"]},
+      ],
+    }]);
+  });
+
+  it("builds distinct per-row bind paths from static map scope", async () => {
+    let result = await parseRenderUIJsx(
+        '<Stack>{data.rows.map((row, index) => <Input label={row.name} ' +
+        'value={bind(`rows.${index}.value`)} />)}</Stack>',
+        {rows: [{value: "Ada"}, {value: "Grace"}]},
+        {rows: [{name: "First"}, {name: "Second"}]});
+
+    expect(result.tree.children).toMatchObject([
+      {type: "Input", props: {label: "First", value: {$bind: "rows.0.value"}}},
+      {type: "Input", props: {label: "Second", value: {$bind: "rows.1.value"}}},
+    ]);
+  });
+
+  it("rejects raw bind markers supplied through static data", async () => {
+    await expect(parseRenderUIJsx(
+        `<Input value={data.binding} />`, {name: "Ada"}, {binding: {$bind: "name"}}))
+        .rejects.toThrow(/data\.binding contains reserved key \$bind.*use bind\(path\)/);
+  });
+
   it("rejects unknown components and lists the catalog", async () => {
     await expect(parseRenderUIJsx(`<Marquee>Hi</Marquee>`)).rejects.toThrow(
         /Unknown renderUI component.*Allowed components:.*Stack.*KeyValue/s);
@@ -294,6 +361,7 @@ describe("bounded renderUI expression interpreter", () => {
   it.each([
     ["unknown global", "<Text label={globalThis.secret} />"],
     ["ordinary call", "<Text label={String(1)} />"],
+    ["Math call", "<ProgressBar value={Math.round(data.value)} />"],
     ["function", "<Text label={function () {}} />"],
     ["standalone arrow", "<Text label={() => 1} />"],
     ["block-bodied map arrow", "<Stack>{data.map(item => { return <Text/>; })}</Stack>"],
@@ -309,7 +377,7 @@ describe("bounded renderUI expression interpreter", () => {
     ["array spread", "<Select options={['a', ...data.items]} />"],
     ["object spread", "<Table rows={[{...data.row}]} />"],
     ["raw bind marker", "<Input value={{$bind:'name'}} />"],
-    ["non-literal bind path", "<Input value={bind(path)} />"],
+    ["non-string bind path", "<Input value={bind(1)} />"],
   ])("rejects non-whitelisted syntax: %s", async (_name, source) => {
     await expect(parseRenderUIJsx(source, {}, {name: "n", count: 1, a: 1, b: 2,
       items: [], row: {}, tag: "x"})).rejects.toThrow(

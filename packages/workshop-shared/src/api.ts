@@ -3169,8 +3169,8 @@ export type AiToolCall = {
 } | {
   /**
    * Answer with an ephemeral interface instead of prose: the model writes JSX against the
-   * whitelisted `GENERATIVE_UI_CATALOG`, the DO evaluates it in a fresh sandboxed isolate, and only
-   * the validated JSON tree comes back. Nothing executable ever reaches the client.
+   * whitelisted `GENERATIVE_UI_CATALOG`, the DO interprets its parsed syntax tree, and only the
+   * validated JSON tree comes back. Nothing executable ever reaches the client.
    *
    * `state` seeds the card's bound state where the JSX's own `bind()` defaults aren't enough (a
    * form pre-filled from something the agent already knows). Validation failures are ordinary tool
@@ -3180,6 +3180,9 @@ export type AiToolCall = {
   input: {
     jsx: string;
     state?: Record<string, unknown>;
+
+    /** Static JSON exposed to the interpreted JSX as the sole top-level `data` identifier. */
+    data?: unknown;
   };
 
   /**
