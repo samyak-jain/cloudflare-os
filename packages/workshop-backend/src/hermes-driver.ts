@@ -7,6 +7,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   HERMES_PROTOCOL_VERSION as PROTOCOL_VERSION,
   makeHermesTurnRequest,
@@ -33,6 +34,8 @@ export type HermesAttachedTurn = {
 /** Transport and persistence callbacks supplied by the Workshop agent/Overseer boundary. */
 export interface HermesDriverHooks {
   emit(event: AgentEvent): Promise<void> | void;
+  /** Project a redacted Hermes-local tool lifecycle directly to the display stream. */
+  emitToolActivity(name: string, status: HermesToolActivityStatus): Promise<void> | void;
   emitTerminal?(turnId: string, sequence: number, event: AgentEvent): Promise<void> | void;
   claimToolCall(
     turnId: string,
@@ -87,6 +90,9 @@ export interface HermesDriverOptions {
 /** One bounded, idempotent workspace-state notice derived during Workshop replay. */
 export type HermesWorkspaceDelta = { deltaId: string; payload: Record<string, unknown> };
 
+/** Redacted lifecycle states Hermes exposes for its own local tools. */
+export type HermesToolActivityStatus = "started" | "completed" | "error";
+
 type HermesEvent = {
   protocol_version: number;
   turn_id: string;
@@ -96,6 +102,9 @@ type HermesEvent = {
   timestamp: number;
   [key: string]: unknown;
 };
+
+type HermesDriverLogFields = { hermesEventType?: string };
+const logger = createLogger<HermesDriverLogFields>({ component: "workshop.hermes-driver" });
 
 /** Sanitized Hermes transport failure; response bodies are deliberately never retained. */
 export class HermesHttpError extends Error {
@@ -191,6 +200,14 @@ function requireString(event: HermesEvent, field: string): string {
     throw new HermesProtocolError(`Hermes event field ${field} must be a string.`);
   }
   return value;
+}
+
+function requireToolActivityStatus(event: HermesEvent): HermesToolActivityStatus {
+  let status = requireString(event, "status");
+  if (status !== "started" && status !== "completed" && status !== "error") {
+    throw new HermesProtocolError("Hermes tool_activity status is invalid.");
+  }
+  return status;
 }
 
 function parseEvent(value: unknown): HermesEvent {
@@ -615,6 +632,12 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               });
               break;
             }
+            case "tool_activity":
+              await options.hooks.emitToolActivity(
+                requireString(event, "name"),
+                requireToolActivityStatus(event),
+              );
+              break;
             case "tool_call.start": {
               let callId = requireString(event, "call_id");
               let name = requireString(event, "name");
@@ -883,7 +906,11 @@ export async function runHermesTurn(options: HermesDriverOptions): Promise<void>
               break;
             }
             default:
-              throw new HermesProtocolError(`Unknown Hermes event type: ${event.event}`);
+              logger.warn("ignored unknown Hermes event type", {
+                event: "hermes.event.unknown",
+                hermesEventType: event.event.slice(0, 128),
+              });
+              break;
           }
           if (terminal) break;
         }

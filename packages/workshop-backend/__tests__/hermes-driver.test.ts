@@ -94,11 +94,15 @@ function tool(execute: AgentTool["execute"]): AgentTool {
 
 function harness(server: FakeHermesServer, overrides: Partial<HermesDriverHooks> = {}) {
   let events: AgentEvent[] = [];
+  let toolActivities: { name: string; status: string }[] = [];
   let stored = new Map<string, HermesToolResult>();
   let sessions: string[] = [];
   let hooks: HermesDriverHooks = {
     emit: (event) => {
       events.push(event);
+    },
+    emitToolActivity: (name, status) => {
+      toolActivities.push({ name, status });
     },
     claimToolCall: async (turnId, callId) => {
       let result = stored.get(`${turnId}.${callId}`);
@@ -118,7 +122,7 @@ function harness(server: FakeHermesServer, overrides: Partial<HermesDriverHooks>
     pauseReasonAfterTool: () => undefined,
     ...overrides,
   };
-  return { events, hooks, sessions, stored, fetch: server.fetch };
+  return { events, toolActivities, hooks, sessions, stored, fetch: server.fetch };
 }
 
 function terminalEvents(from = 1): EventInput[] {
@@ -159,6 +163,110 @@ describe("Hermes remote driver", () => {
       type: "turn_end",
       message: { stopReason: "stop", usage: { totalTokens: 5 } },
     });
+  });
+
+  it("projects local tool activity without claiming, executing, or posting a result", async () => {
+    let execute = vi.fn(async () => ({
+      content: [{ type: "text" as const, text: "written" }],
+      details: {},
+    }));
+    let claim = vi.fn(async () => ({ execute: true as const }));
+    let server = new FakeHermesServer([
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "message.start" },
+      { seq: 3, event: "text.delta", delta: "Working" },
+      { seq: 4, event: "tool_activity", name: "memory", status: "started" },
+      { seq: 5, event: "future.progress", private_payload: "must be ignored" },
+      { seq: 6, event: "tool_activity", name: "memory", status: "completed" },
+      { seq: 7, event: "tool_call.start", call_id: "call-1", name: "writeFile" },
+      {
+        seq: 8,
+        event: "tool_call.arguments.delta",
+        call_id: "call-1",
+        delta: '{"filename":"a.txt"}',
+      },
+      {
+        seq: 9,
+        event: "tool_call.end",
+        call_id: "call-1",
+        arguments: { filename: "a.txt" },
+      },
+      { seq: 10, event: "turn.end", status: "completed", stop_reason: "stop" },
+    ]);
+    let run = harness(server, { claimToolCall: claim });
+    let writeFile = {
+      ...tool(execute),
+      name: "writeFile",
+      label: "Write file",
+    };
+    await runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "activity-and-tool-call",
+      inputText: "write it",
+      tools: [writeFile],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    });
+
+    expect(run.toolActivities).toEqual([
+      { name: "memory", status: "started" },
+      { name: "memory", status: "completed" },
+    ]);
+    expect(claim).toHaveBeenCalledOnce();
+    expect(claim).toHaveBeenCalledWith(
+      "turn-1", "call-1", "writeFile", "session-1", expect.any(AbortSignal),
+    );
+    expect(execute).toHaveBeenCalledOnce();
+    expect(server.toolResults).toEqual([
+      { protocol_version: 1, result: "written", is_error: false },
+    ]);
+    expect([...run.stored.keys()]).toEqual(["turn-1.call-1"]);
+    expect(run.events.some(event => event.type === "turn_end")).toBe(true);
+  });
+
+  it("keeps known tool_activity validation strict", async () => {
+    let server = new FakeHermesServer([
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "tool_activity", name: "memory", status: "almost_done" },
+    ]);
+    let run = harness(server);
+    await expect(runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "bad-activity",
+      inputText: "status",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    })).rejects.toThrow("tool_activity status is invalid");
+  });
+
+  it("does not let additive-event tolerance mask malformed executable events", async () => {
+    let server = new FakeHermesServer([
+      { seq: 1, event: "turn.started" },
+      { seq: 2, event: "future.progress" },
+      { seq: 3, event: "tool_call.start", name: "readFile" },
+    ]);
+    let run = harness(server);
+    await expect(runHermesTurn({
+      baseUrl: "https://hermes.test",
+      apiKey: "a".repeat(64),
+      workspaceId: "workspace-1",
+      chatId: "7",
+      clientTurnId: "bad-tool-call",
+      inputText: "status",
+      tools: [],
+      signal: new AbortController().signal,
+      hooks: run.hooks,
+      fetch: run.fetch,
+    })).rejects.toThrow("field call_id must be a string");
   });
 
   it("reattaches with after_seq when the initial SSE subscriber disconnects", async () => {

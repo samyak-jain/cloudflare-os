@@ -3139,6 +3139,11 @@ export async function runAgent(
           workspaceDeltas: hermesWorkspaceDeltas,
           hooks: {
             emit: event => emit(event),
+            emitToolActivity: (name, status) => emitStreamEvent({
+              type: "toolActivity",
+              toolName: name,
+              status,
+            }),
             emitTerminal: (turnId, sequence, event) =>
               emit(event, {turnId, sequence}),
             claimToolCall: (turnId, callId, toolName, sessionId, signal) =>

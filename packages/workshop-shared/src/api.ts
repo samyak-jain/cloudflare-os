@@ -3384,6 +3384,14 @@ export type AiChatStreamEvent = {
   type: "reasoningDelta";
   delta: string;
 } | {
+  /**
+   * Display-only lifecycle for a tool executed locally by a remote agent. It intentionally has no
+   * call ID, arguments, or result and must never enter the Workshop tool-execution path.
+   */
+  type: "toolActivity";
+  toolName: string;
+  status: "started" | "completed" | "error";
+} | {
   type: "toolCallStarted";
   toolCallId: string;
   toolName: AiToolCall["toolName"];

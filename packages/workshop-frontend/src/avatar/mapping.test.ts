@@ -201,6 +201,19 @@ describe("tool execution", () => {
     expect(d.state).toEqual({ kind: "working", work: "read" });
   });
 
+  it("reads display-only Hermes local-tool activity as work without a call id", () => {
+    const d = new Driver();
+    d.active(true).stream({ type: "toolActivity", toolName: "memory", status: "started" });
+    expect(d.state).toEqual({ kind: "working", work: "execute" });
+
+    d.advance(1_000).stream({
+      type: "toolActivity",
+      toolName: "memory",
+      status: "completed",
+    });
+    expect(d.state).toEqual({ kind: "working", work: "execute" });
+  });
+
   it("reads an edit preview as a write even with no toolCallStarted seen", () => {
     const d = new Driver();
     d.active(true).stream({
