@@ -22,6 +22,7 @@ const PROVIDER_LABELS: Record<AiModelProvider, string> = {
   google: 'Google',
   cloudflare: 'Cloudflare Workers AI',
   ollama: 'Ollama',
+  hermes: 'Hermes',
 }
 
 // Placeholder hinting at the shape of each provider's API token.
@@ -31,6 +32,7 @@ const API_TOKEN_PLACEHOLDERS: Record<AiModelProvider, string> = {
   google: 'AIza...',
   cloudflare: 'Cloudflare API token',
   ollama: '(optional)',
+  hermes: '(configured by deployment)',
 }
 
 // Example used in the custom-model placeholders for providers that have no suggested models
@@ -160,10 +162,11 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
     }
 
     const isOllama = selection?.provider === 'ollama'
+    const isHermes = selection?.provider === 'hermes'
     const isCloudflare = selection?.provider === 'cloudflare'
     const showCredentials = !gatewayMode
 
-    if (showCredentials && selection && !isOllama && !apiToken.trim()) {
+    if (showCredentials && selection && !isOllama && !isHermes && !apiToken.trim()) {
       newErrors.apiToken = 'Please enter your API token'
     }
 
@@ -218,7 +221,8 @@ export default function AddModelModal({ visible, onCancel, onSuccess, authentica
   const example = selection ? exampleModel(selection.provider) : null
   const isOllama = selection?.provider === 'ollama'
   const isCloudflare = selection?.provider === 'cloudflare'
-  const showCredentials = !gatewayMode
+  const isHermes = selection?.provider === 'hermes'
+  const showCredentials = !gatewayMode && !isHermes
 
   // Group options by provider for rendering with visual separators.
   const groupedOptions: { provider: string; items: typeof options }[] = []

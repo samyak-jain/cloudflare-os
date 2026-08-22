@@ -24,6 +24,14 @@ declare global {
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 
+      // Deployment-owned Hermes remote-agent transport. Unlike ordinary model credentials these
+      // are never stored in a user's AiModelConfig.
+      HERMES_BASE_URL?: string;
+      WORKSHOP_API_KEY?: string;
+      WORKSHOP_WAKE_TOKEN?: string;
+      HERMES_ALLOW_INSECURE_LOOPBACK?: string;
+      HERMES_LOCAL_TOOL_TIMEOUT_MS?: string;
+
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
       BLUEPRINT_CONTENT: R2Bucket;         // R2 bucket for blueprint code snapshots

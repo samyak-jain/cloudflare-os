@@ -70,6 +70,52 @@ describe("getModel AI Gateway routing", () => {
     capturedRequests.length = 0;
   });
 
+  it("bypasses AI Gateway and user billing for deployment-owned Hermes", () => {
+    const handle = getModel(env({
+      HERMES_BASE_URL: "https://hermes.example/",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), {
+      provider: "hermes",
+      model: "hermes",
+      apiToken: "user-token-must-not-be-used",
+    }, INITIATOR, {
+      userGateway: {accountId: "user-account", apiKey: "user-gateway-key"},
+    });
+
+    expect(handle.hermes).toEqual({
+      baseUrl: "https://hermes.example",
+      apiKey: "a".repeat(64),
+    });
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+  });
+
+  it("rejects cleartext Hermes except explicit loopback development", () => {
+    let config = {provider: "hermes" as const, model: "hermes", apiToken: ""};
+    expect(() => getModel(env({
+      HERMES_BASE_URL: "http://hermes.internal",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), config, INITIATOR)).toThrow("must use HTTPS");
+    expect(getModel(env({
+      HERMES_BASE_URL: "http://127.0.0.1:8788",
+      HERMES_ALLOW_INSECURE_LOOPBACK: "true",
+      WORKSHOP_API_KEY: "a".repeat(64),
+    }), config, INITIATOR).hermes?.baseUrl).toBe("http://127.0.0.1:8788");
+  });
+
+  it("validates the deployment-configured Hermes local tool timeout", () => {
+    let config = {provider: "hermes" as const, model: "hermes", apiToken: ""};
+    expect(getModel(env({
+      HERMES_BASE_URL: "https://hermes.example",
+      WORKSHOP_API_KEY: "a".repeat(64),
+      HERMES_LOCAL_TOOL_TIMEOUT_MS: "120000",
+    }), config, INITIATOR).hermes?.localToolTimeoutMs).toBe(120_000);
+    expect(() => getModel(env({
+      HERMES_BASE_URL: "https://hermes.example",
+      WORKSHOP_API_KEY: "a".repeat(64),
+      HERMES_LOCAL_TOOL_TIMEOUT_MS: "forever",
+    }), config, INITIATOR)).toThrow("HERMES_LOCAL_TOOL_TIMEOUT_MS");
+  });
+
   it("routes non-Workers providers through the platform gateway", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
