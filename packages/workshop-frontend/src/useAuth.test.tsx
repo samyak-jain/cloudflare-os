@@ -22,6 +22,7 @@ const serverConfig: ServerConfig = {
   authVendors: [],
   passwordAuthEnabled: true,
   cloudflareLimitsEnabled: false,
+  chatAvatarEnabled: false,
   signupsEnabled: true,
   siteName: '',
   announcement: '',

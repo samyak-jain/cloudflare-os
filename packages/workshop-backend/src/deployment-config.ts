@@ -54,6 +54,7 @@ export async function getServerConfig(env: Cloudflare.Env): Promise<ServerConfig
     authVendors,
     passwordAuthEnabled: isPasswordAuthEnabled(env),
     cloudflareLimitsEnabled: isCloudflareLimitsEnabled(env),
+    chatAvatarEnabled: env.FEATURE_CHAT_AVATAR === "true",
     signupsEnabled: config.signupsEnabled,
     siteName: config.siteName,
     siteLogo: siteLogoImage(config.siteLogoConfigured),

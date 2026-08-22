@@ -1075,6 +1075,12 @@ export type ServerConfig = {
   cloudflareLimitsEnabled: boolean;
 
   /**
+   * Whether the animated chat avatar is rendered in the chat headers. Off by default; a
+   * deployment opts in with FEATURE_CHAT_AVATAR=true.
+   */
+  chatAvatarEnabled: boolean;
+
+  /**
    * Whether new account signups are allowed (admin-configurable, default true). The signup page
    * hides the create-account form when false.
    */
