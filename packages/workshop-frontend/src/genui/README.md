@@ -2,17 +2,33 @@
 
 Ephemeral interfaces in the chat: Lena answers with a form, a table, or a picker instead of prose.
 She writes JSX against a whitelisted catalog. The backend parses it as data with a real JSX parser,
-interprets only catalog elements and literals, and sends only a validated
+interprets a bounded expression grammar over static JSON, and sends only a validated
 `{type, props, children}` JSON tree to the client. See `docs/cloudflare-os-integration.md` §
 "Generative UI" in the design repo.
 
 **Nothing executable crosses the wire.** No handlers, closures, or component code — a prop is a
 literal, a `{"$bind": "path"}` marker, or JSON built from those. Model-authored JavaScript is
-never executed: imports, calls other than `bind("path")`, functions, operators, spreads,
-conditionals, loops, and template literals do not belong to the accepted AST grammar. After
-interpretation, the backend independently re-validates and reconstructs component names, prop
-schemas, bindings, JSON shape, node budget, and byte budget before persistence. The client
-validates again so old or future durable rows degrade safely, but does not replace backend checks.
+never executed. The parent first validates the complete AST, including unselected conditional
+branches, then interprets only literals, catalog JSX, scoped static-data reads, finite `.map`, pure
+conditionals/comparisons, and bounded string building. Imports and every non-whitelisted construct
+are structural errors. After interpretation, the backend independently re-validates and
+reconstructs component names, prop schemas, bindings, JSON shape, node budget, and byte budget
+before persistence. The client validates again so old or future durable rows degrade safely, but
+does not replace backend checks.
+
+## Why interpretation terminates
+
+The expression language has no executable functions, declarations, assignments, updates, loops,
+or recursion. Its sole arrow form is a concise callback directly attached to `.map`; its sole
+iteration ranges over an already-materialized array from a literal, static `data`, or another
+allowed expression. Bound `state` is not in the identifier environment and `bind()` produces only
+a leaf marker, so runtime form data cannot become a collection program.
+
+Finite input therefore implies finite evaluation. Hard limits make that argument operational and
+fail closed: 64 KiB each for source and static data, 20,000 AST nodes, 100,000 expression
+evaluations, 10,000 total and nested-product map iterations, 32 member reads, 16,384 characters per
+string, 5,000 emitted components, and 256 KiB for both aggregate evaluated strings and the final
+serialized tree. Exceeding a limit is an ordinary tool error; output is never truncated.
 
 ## Layers
 

@@ -7592,11 +7592,11 @@ class OverseerImpl implements AgentHooks {
 
   async renderUI(
       chatId: number, jsx: string,
-      stateDefaults: Record<string, unknown>): Promise<GenerativeUiResult> {
+      stateDefaults: Record<string, unknown>, data?: unknown): Promise<GenerativeUiResult> {
     if (!this.storage.chatMeta.get(chatId)) throw new Error(`No such chat: ${chatId}`);
-    let result = await parseRenderUIJsx(jsx, stateDefaults);
+    let result = await parseRenderUIJsx(jsx, stateDefaults, data);
     if (!this.storage.chatMeta.get(chatId)) {
-      throw new Error("The chat was deleted while renderUI was executing.");
+      throw new Error("The chat was deleted while renderUI was being interpreted.");
     }
 
     // Only paths actually referenced by a validated bind marker enter durable state. Reusing a

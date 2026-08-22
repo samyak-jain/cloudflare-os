@@ -7,21 +7,62 @@ teach the model.
 
 Conventions used throughout:
 
-- **`bind("dot.path")`** — this is the one callable form accepted in JSX, and only for props
-  marked *bindable*. The parser converts it to the wire marker `{ "$bind": "dot.path" }`;
+- **`bind("dot.path")`** — this is the only runtime-binding call, and only for props
+  marked *bindable*. The interpreter converts it to the wire marker `{ "$bind": "dot.path" }`;
   writing that object directly in JSX is rejected. The path addresses `stateDefaults` as a
   plain object tree; array indices are numeric segments (`tags.0`). A control whose value prop
   is not bound renders read-only, because there is nowhere for its edits to go.
-- **JSX is literal-only data.** Braced props accept string, number, boolean and null literals,
-  literal arrays/objects, or the exact `bind("path")` form. Identifiers, other calls, template
-  literals, functions, operators, spreads, conditionals, imports and loops are rejected.
-  Children are catalog elements, text, or scalar literals.
+- **JSX is an interpreted expression language, not JavaScript.** The backend parses the entire
+  source and evaluates a fixed, bounded AST grammar. Nothing is compiled or executed.
+- **`data` is the only top-level identifier.** It refers to the optional static JSON supplied with
+  the tool call. A direct `.map` callback adds its `item` and optional `index` parameters to a
+  lexical child scope. There are no globals, `this`, `window`, or ambient names.
+- **Allowed expressions** are JSON literals (including arrays/objects and negative numbers),
+  catalog JSX, pure `item.name` / `item[0]` / `array.length` reads, direct
+  `array.map((item, index) => expression)`, ternary and `&&` / `||` conditionals,
+  `=== !== < > <= >=`, template strings, and string `+`. The only other call is the exact
+  `bind("literal.path")` form in a bindable prop.
+- **Everything else is rejected structurally in every branch.** That includes imports, ordinary
+  or member calls, arrows outside direct `.map`, block-bodied callbacks, declarations, loops,
+  assignments, updates, `new`, spreads, tagged templates, sequence expressions, optional access,
+  and the keys `__proto__`, `constructor`, and `prototype`.
 - **Variant props are matched case-insensitively**, and an unrecognized value falls back to the
   default rather than failing the card.
 - **Numbers may arrive as numeric strings** (`max="100"`), which is what a JSX attribute often is.
 - **Children** are other catalog elements and text. Components marked *text* below take their
   content from children, or from a `label` prop when they have no children.
 - The backend rejects everything not listed. Nothing is required except where stated.
+
+For repeated data, send the array once and map it into a static prop value:
+
+```jsx
+<Table
+  columns={["name", {key: "score", label: "Score", align: "right"}]}
+  rows={data.rows.map((row, index) => ({
+    name: `${index + ": "}${row.name}`,
+    score: row.score,
+  }))}
+/>
+```
+
+with `data: {rows: [{name: "Ada", score: 12}]}`. `.map` runs only while the durable tree is being
+generated. It can range over literal/static `data` arrays or arrays produced by another allowed
+expression, never over runtime bound `state`. A row per bound-state item is out of scope for v1.
+
+## Expression limits
+
+Programs are rejected rather than truncated when any limit would be exceeded:
+
+| Limit | Maximum |
+| --- | ---: |
+| JSX source / static `data` / bound `state` | 64 KiB each |
+| Parsed AST nodes | 20,000 |
+| Expression evaluations | 100,000 |
+| `.map` callback iterations, total and nested product | 10,000 |
+| Contiguous member/index reads | 32 |
+| One produced string | 16,384 characters |
+| Aggregate evaluated strings / serialized validated tree | 256 KiB each |
+| Emitted catalog nodes | 5,000 |
 
 ## Layout
 

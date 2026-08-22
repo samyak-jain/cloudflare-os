@@ -1,6 +1,7 @@
 // renderUI parses JSX as data in the trusted Worker. Model-authored source is never evaluated or
-// loaded as JavaScript: a deliberately tiny AST interpreter accepts only catalog elements,
-// literals, and bind("path"), then the independent tree validator reconstructs the durable JSON.
+// loaded as JavaScript: a bounded AST interpreter accepts catalog elements and a terminating
+// expression grammar over static JSON, then the independent tree validator reconstructs the
+// durable JSON.
 
 import {
   GENERATIVE_UI_CATALOG_VERSION,
@@ -20,6 +21,21 @@ export const MAX_RENDER_UI_SOURCE_BYTES = 64 * 1024;
 
 /** Maximum UTF-8 size of a validated renderUI tree. */
 export const MAX_RENDER_UI_TREE_BYTES = 256 * 1024;
+
+/** Maximum UTF-8 size of the optional static data scope. */
+export const MAX_RENDER_UI_DATA_BYTES = 64 * 1024;
+
+/** Maximum number of expression evaluations performed by one renderUI interpretation. */
+export const MAX_RENDER_UI_EXPRESSION_EVALUATIONS = 100_000;
+
+/** Maximum total and nested-product callback iterations across all whitelisted .map calls. */
+export const MAX_RENDER_UI_MAP_ITERATIONS = 10_000;
+
+/** Maximum number of contiguous pure member/index reads in one expression. */
+export const MAX_RENDER_UI_MEMBER_DEPTH = 32;
+
+/** Maximum UTF-16 length of any string produced by the expression interpreter. */
+export const MAX_RENDER_UI_STRING_LENGTH = 16 * 1024;
 
 const MAX_RENDER_UI_STATE_BYTES = 64 * 1024;
 const MAX_RENDER_UI_DEPTH = 64;
@@ -227,7 +243,29 @@ const JsxParser = Parser.extend(jsx({
 }));
 
 type AstNode = Node & Record<string, unknown>;
-type AstBudget = {count: number};
+type SyntaxBudget = {count: number};
+type RuntimeObject = {[key: string]: RuntimeValue};
+type RuntimeValue = null | boolean | number | string | RuntimeValue[] | RuntimeObject |
+    GenerativeUiBinding | EvaluatedElement;
+type RuntimeScope = ReadonlyMap<string, RuntimeValue>;
+type EvaluationBudget = {
+  evaluations: number;
+  emittedNodes: number;
+  mapIterations: number;
+  producedStringBytes: number;
+};
+type EvaluationContext = {
+  source: string;
+  scope: RuntimeScope;
+  budget: EvaluationBudget;
+  mapProduct: number;
+};
+
+const EVALUATED_ELEMENT = Symbol("renderUI element");
+type EvaluatedElement = {
+  [EVALUATED_ELEMENT]: true;
+  node: GenerativeUiNode;
+};
 
 function syntaxError(source: string, offset: number, message: string): Error {
   let line = source.slice(0, offset).split("\n").length;
@@ -255,7 +293,7 @@ function astNodes(source: string, value: unknown, parent: AstNode, field: string
   return value;
 }
 
-function enterAst(source: string, node: AstNode, depth: number, budget: AstBudget): void {
+function enterSyntax(source: string, node: AstNode, depth: number, budget: SyntaxBudget): void {
   if (depth > MAX_RENDER_UI_DEPTH) {
     throw syntaxError(source, node.start, "literal/element nesting exceeds the maximum depth.");
   }
@@ -267,7 +305,8 @@ function enterAst(source: string, node: AstNode, depth: number, budget: AstBudge
 
 function rejectAst(source: string, node: AstNode, context: string): never {
   throw syntaxError(source, node.start, node.type + " is not allowed in " + context +
-      ". Allowed syntax is catalog JSX, JSON literals, and bind(\"path\").");
+      ". Allowed syntax is bounded catalog JSX expressions over data, literals, .map(), " +
+      "conditionals, pure member reads, string building, and bind(\"path\").");
 }
 
 function literalValue(source: string, node: AstNode): JsonValue {
@@ -287,76 +326,6 @@ function objectKey(source: string, node: AstNode): string {
   return rejectAst(source, node, "an object key");
 }
 
-function interpretValue(
-    source: string, node: AstNode, depth: number, budget: AstBudget,
-    allowBind: boolean): JsonValue | GenerativeUiBinding {
-  enterAst(source, node, depth, budget);
-  if (node.type === "Literal") return literalValue(source, node);
-
-  if (node.type === "ArrayExpression") {
-    let elements = node.elements;
-    if (!Array.isArray(elements)) return rejectAst(source, node, "an array literal");
-    return elements.map((element, index) => {
-      if (element === null || !isAstNode(element)) {
-        throw syntaxError(source, node.start, "array literals cannot contain holes at index " + index + ".");
-      }
-      if (element.type === "SpreadElement") {
-        return rejectAst(source, element, "an array literal");
-      }
-      return interpretValue(source, element, depth + 1, budget, false) as JsonValue;
-    });
-  }
-
-  if (node.type === "ObjectExpression") {
-    let result: {[key: string]: JsonValue} = Object.create(null);
-    for (let property of astNodes(source, node.properties, node, "properties")) {
-      enterAst(source, property, depth + 1, budget);
-      if (property.type !== "Property" || property.kind !== "init" ||
-          property.method === true || property.computed === true || property.shorthand === true) {
-        rejectAst(source, property, "an object literal");
-      }
-      let keyNode = astNode(source, property.key, property, "key");
-      enterAst(source, keyNode, depth + 2, budget);
-      let key = objectKey(source, keyNode);
-      if (key === "$bind") {
-        throw syntaxError(source, keyNode.start,
-            "raw $bind objects are not accepted in JSX; use bind(\"path\") instead.");
-      }
-      if (BLOCKED_JSON_KEYS.has(key)) {
-        throw syntaxError(source, keyNode.start, "object key " + JSON.stringify(key) + " is forbidden.");
-      }
-      if (Object.hasOwn(result, key)) {
-        throw syntaxError(source, keyNode.start, "duplicate object key " + JSON.stringify(key) + ".");
-      }
-      let valueNode = astNode(source, property.value, property, "value");
-      Object.defineProperty(result, key, {
-        value: interpretValue(source, valueNode, depth + 2, budget, false) as JsonValue,
-        enumerable: true,
-      });
-    }
-    return result;
-  }
-
-  if (node.type === "CallExpression" && allowBind) {
-    let callee = astNode(source, node.callee, node, "callee");
-    let args = astNodes(source, node.arguments, node, "arguments");
-    if (callee.type !== "Identifier" || callee.name !== "bind" || args.length !== 1) {
-      return rejectAst(source, node, "a prop value");
-    }
-    enterAst(source, callee, depth + 1, budget);
-    let argument = args[0];
-    enterAst(source, argument, depth + 1, budget);
-    if (argument.type !== "Literal" || typeof argument.value !== "string" ||
-        argument.value.length === 0) {
-      throw syntaxError(source, argument.start,
-          "bind() requires exactly one non-empty string literal path.");
-    }
-    return {$bind: argument.value};
-  }
-
-  return rejectAst(source, node, "a prop value");
-}
-
 function jsxName(source: string, value: unknown, parent: AstNode): string {
   let node = astNode(source, value, parent, "name");
   if (node.type !== "JSXIdentifier" || typeof node.name !== "string") {
@@ -365,61 +334,118 @@ function jsxName(source: string, value: unknown, parent: AstNode): string {
   return node.name;
 }
 
-function interpretAttribute(
-    source: string, attribute: AstNode, depth: number, budget: AstBudget): [string, unknown] {
-  enterAst(source, attribute, depth, budget);
-  if (attribute.type === "JSXSpreadAttribute") {
-    rejectAst(source, attribute, "component props");
-  }
-  if (attribute.type !== "JSXAttribute") {
-    rejectAst(source, attribute, "component props");
-  }
-  let name = jsxName(source, attribute.name, attribute);
-  if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML" ||
-      BLOCKED_JSON_KEYS.has(name)) {
-    throw syntaxError(source, attribute.start, "forbidden prop " + JSON.stringify(name) +
-        " attempts handler or reserved-prop smuggling; event handlers and HTML are never allowed.");
-  }
-  let value = attribute.value;
-  if (value === null) return [name, true];
-
-  let valueNode = astNode(source, value, attribute, "value");
-  if (valueNode.type === "Literal") {
-    enterAst(source, valueNode, depth + 1, budget);
-    return [name, literalValue(source, valueNode)];
-  }
-  if (valueNode.type !== "JSXExpressionContainer") {
-    return rejectAst(source, valueNode, "a prop value");
-  }
-  enterAst(source, valueNode, depth + 1, budget);
-  let expression = astNode(source, valueNode.expression, valueNode, "expression");
-  if (expression.type === "JSXEmptyExpression") {
-    throw syntaxError(source, expression.start, "prop " + name + " has an empty expression.");
-  }
-  return [name, interpretValue(source, expression, depth + 2, budget, true)];
-}
-
 function jsxText(value: unknown): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ") : "";
 }
 
-function interpretChildExpression(
-    source: string, node: AstNode, depth: number, budget: AstBudget):
-    GenerativeUiNode | string | null {
-  if (node.type === "JSXElement") return interpretElement(source, node, depth, budget);
-  let value = interpretValue(source, node, depth, budget, false);
-  if (value === null || typeof value === "boolean") return null;
-  if (typeof value === "string" || typeof value === "number") return String(value);
-  return rejectAst(source, node, "JSX children");
+function assertSafeKey(source: string, node: AstNode, key: string, context: string): string {
+  if (BLOCKED_JSON_KEYS.has(key)) {
+    throw syntaxError(source, node.start, context + " key " + JSON.stringify(key) + " is forbidden.");
+  }
+  return key;
 }
 
-function interpretElement(
-    source: string, element: AstNode, depth: number, budget: AstBudget): GenerativeUiNode {
-  enterAst(source, element, depth, budget);
-  if (element.type !== "JSXElement") return rejectAst(source, element, "the renderUI root");
+function memberKey(source: string, member: AstNode): string {
+  let property = astNode(source, member.property, member, "property");
+  if (member.computed === true) {
+    if (property.type !== "Literal") {
+      throw syntaxError(source, property.start,
+          "computed member access requires a literal string or non-negative integer index.");
+    }
+    let value = literalValue(source, property);
+    if (typeof value === "string") return assertSafeKey(source, property, value, "member");
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+      return String(value);
+    }
+    return rejectAst(source, property, "computed member access");
+  }
+  if (property.type !== "Identifier" || typeof property.name !== "string") {
+    return rejectAst(source, property, "member access");
+  }
+  return assertSafeKey(source, property, property.name, "member");
+}
 
+function isBindCall(source: string, node: AstNode): boolean {
+  if (node.type !== "CallExpression") return false;
+  let callee = astNode(source, node.callee, node, "callee");
+  return callee.type === "Identifier" && callee.name === "bind";
+}
+
+function isMapCall(source: string, node: AstNode): boolean {
+  if (node.type !== "CallExpression") return false;
+  let callee = astNode(source, node.callee, node, "callee");
+  if (callee.type !== "MemberExpression" || callee.computed === true || callee.optional === true) {
+    return false;
+  }
+  let property = astNode(source, callee.property, callee, "property");
+  return property.type === "Identifier" && property.name === "map";
+}
+
+function validateObjectAst(
+    source: string, node: AstNode, scope: ReadonlySet<string>, depth: number,
+    budget: SyntaxBudget): void {
+  for (let property of astNodes(source, node.properties, node, "properties")) {
+    enterSyntax(source, property, depth + 1, budget);
+    if (property.type !== "Property" || property.kind !== "init" || property.method === true ||
+        property.computed === true || property.shorthand === true) {
+      rejectAst(source, property, "an object literal");
+    }
+    let keyNode = astNode(source, property.key, property, "key");
+    enterSyntax(source, keyNode, depth + 2, budget);
+    let key = objectKey(source, keyNode);
+    if (key === "$bind") {
+      throw syntaxError(source, keyNode.start,
+          "raw $bind objects are not accepted in JSX; use bind(\"path\") instead.");
+    }
+    assertSafeKey(source, keyNode, key, "object");
+    validateExpressionAst(source, astNode(source, property.value, property, "value"),
+        scope, depth + 2, budget, false, 0);
+  }
+}
+
+function validateMapAst(
+    source: string, node: AstNode, scope: ReadonlySet<string>, depth: number,
+    budget: SyntaxBudget): void {
+  let callee = astNode(source, node.callee, node, "callee");
+  enterSyntax(source, callee, depth + 1, budget);
+  let property = astNode(source, callee.property, callee, "property");
+  enterSyntax(source, property, depth + 2, budget);
+  validateExpressionAst(source, astNode(source, callee.object, callee, "object"),
+      scope, depth + 2, budget, false, 0);
+  let args = astNodes(source, node.arguments, node, "arguments");
+  if (node.optional === true || args.length !== 1 || args[0].type !== "ArrowFunctionExpression") {
+    throw syntaxError(source, node.start,
+        ".map() requires exactly one direct concise arrow callback.");
+  }
+  let callback = args[0];
+  enterSyntax(source, callback, depth + 1, budget);
+  let params = astNodes(source, callback.params, callback, "params");
+  if (params.length < 1 || params.length > 2 || callback.async === true ||
+      callback.generator === true || callback.expression !== true) {
+    throw syntaxError(source, callback.start,
+        ".map() callbacks must be a synchronous concise arrow with item or item,index parameters.");
+  }
+  let callbackScope = new Set(scope);
+  let parameterNames = new Set<string>();
+  for (let param of params) {
+    enterSyntax(source, param, depth + 2, budget);
+    if (param.type !== "Identifier" || typeof param.name !== "string" ||
+        param.name === "data" || param.name === "bind" || parameterNames.has(param.name)) {
+      throw syntaxError(source, param.start,
+          ".map() parameters must be unique identifiers other than data or bind.");
+    }
+    parameterNames.add(param.name);
+    callbackScope.add(param.name);
+  }
+  validateExpressionAst(source, astNode(source, callback.body, callback, "body"),
+      callbackScope, depth + 2, budget, false, 0);
+}
+
+function validateElementAst(
+    source: string, element: AstNode, scope: ReadonlySet<string>, depth: number,
+    budget: SyntaxBudget): void {
   let opening = astNode(source, element.openingElement, element, "openingElement");
-  enterAst(source, opening, depth + 1, budget);
+  enterSyntax(source, opening, depth + 1, budget);
   let type = jsxName(source, opening.name, opening);
   if (!Object.hasOwn(RENDER_UI_CATALOG, type)) {
     throw syntaxError(source, opening.start, "Unknown renderUI component " + JSON.stringify(type) +
@@ -427,9 +453,11 @@ function interpretElement(
   }
   let component = RENDER_UI_CATALOG[type];
   let allowedProps = Object.keys(component.props);
-  let props: Record<string, unknown> = Object.create(null);
+  let seen = new Set<string>();
   for (let attribute of astNodes(source, opening.attributes, opening, "attributes")) {
-    let [name, value] = interpretAttribute(source, attribute, depth + 2, budget);
+    enterSyntax(source, attribute, depth + 2, budget);
+    if (attribute.type !== "JSXAttribute") rejectAst(source, attribute, "component props");
+    let name = jsxName(source, attribute.name, attribute);
     if (/^on[A-Z]/.test(name) || name === "dangerouslySetInnerHTML" ||
         BLOCKED_JSON_KEYS.has(name)) {
       throw syntaxError(source, attribute.start, "forbidden prop " + JSON.stringify(name) +
@@ -439,38 +467,461 @@ function interpretElement(
       throw syntaxError(source, attribute.start, type + " has unknown prop " + JSON.stringify(name) +
           ". Allowed props: " + (allowedProps.join(", ") || "(none)") + ".");
     }
-    if (Object.hasOwn(props, name)) {
+    if (seen.has(name)) {
       throw syntaxError(source, attribute.start, "duplicate prop " + JSON.stringify(name) + ".");
     }
+    seen.add(name);
+    if (attribute.value === null) continue;
+    let value = astNode(source, attribute.value, attribute, "value");
+    enterSyntax(source, value, depth + 3, budget);
+    if (value.type === "Literal") {
+      literalValue(source, value);
+      continue;
+    }
+    if (value.type !== "JSXExpressionContainer") rejectAst(source, value, "a prop value");
+    let expression = astNode(source, value.expression, value, "expression");
+    if (expression.type === "JSXEmptyExpression") {
+      throw syntaxError(source, expression.start, "prop " + name + " has an empty expression.");
+    }
+    validateExpressionAst(source, expression, scope, depth + 4, budget, true, 0);
+  }
+  for (let child of astNodes(source, element.children, element, "children")) {
+    enterSyntax(source, child, depth + 1, budget);
+    if (child.type === "JSXText") continue;
+    if (child.type === "JSXElement") {
+      validateElementAst(source, child, scope, depth + 1, budget);
+      continue;
+    }
+    if (child.type !== "JSXExpressionContainer") rejectAst(source, child, "JSX children");
+    let expression = astNode(source, child.expression, child, "expression");
+    if (expression.type !== "JSXEmptyExpression") {
+      validateExpressionAst(source, expression, scope, depth + 2, budget, false, 0);
+    }
+  }
+}
+
+function validateExpressionAst(
+    source: string, node: AstNode, scope: ReadonlySet<string>, depth: number,
+    budget: SyntaxBudget, allowBind: boolean, memberDepth: number): void {
+  enterSyntax(source, node, depth, budget);
+  switch (node.type) {
+    case "Literal":
+      literalValue(source, node);
+      return;
+    case "Identifier":
+      if (typeof node.name !== "string" || !scope.has(node.name)) {
+        throw syntaxError(source, node.start, "Unknown identifier " + JSON.stringify(node.name) +
+            ". Allowed identifiers: " + ([...scope].join(", ") || "(none)") + ".");
+      }
+      return;
+    case "ArrayExpression": {
+      let elements = node.elements;
+      if (!Array.isArray(elements)) rejectAst(source, node, "an array literal");
+      elements.forEach((element, index) => {
+        if (element === null || !isAstNode(element)) {
+          throw syntaxError(source, node.start,
+              "array literals cannot contain holes at index " + index + ".");
+        }
+        if (element.type === "SpreadElement") rejectAst(source, element, "an array literal");
+        validateExpressionAst(source, element, scope, depth + 1, budget, false, 0);
+      });
+      return;
+    }
+    case "ObjectExpression":
+      validateObjectAst(source, node, scope, depth, budget);
+      return;
+    case "JSXElement":
+      validateElementAst(source, node, scope, depth, budget);
+      return;
+    case "ConditionalExpression":
+      validateExpressionAst(source, astNode(source, node.test, node, "test"),
+          scope, depth + 1, budget, false, 0);
+      validateExpressionAst(source, astNode(source, node.consequent, node, "consequent"),
+          scope, depth + 1, budget, allowBind, 0);
+      validateExpressionAst(source, astNode(source, node.alternate, node, "alternate"),
+          scope, depth + 1, budget, allowBind, 0);
+      return;
+    case "LogicalExpression":
+      if (node.operator !== "&&" && node.operator !== "||") {
+        rejectAst(source, node, "a logical expression");
+      }
+      validateExpressionAst(source, astNode(source, node.left, node, "left"),
+          scope, depth + 1, budget, false, 0);
+      validateExpressionAst(source, astNode(source, node.right, node, "right"),
+          scope, depth + 1, budget, allowBind, 0);
+      return;
+    case "BinaryExpression":
+      if (!["+", "===", "!==", "<", ">", "<=", ">="].includes(String(node.operator))) {
+        rejectAst(source, node, "a binary expression");
+      }
+      validateExpressionAst(source, astNode(source, node.left, node, "left"),
+          scope, depth + 1, budget, false, 0);
+      validateExpressionAst(source, astNode(source, node.right, node, "right"),
+          scope, depth + 1, budget, false, 0);
+      return;
+    case "UnaryExpression": {
+      let argument = astNode(source, node.argument, node, "argument");
+      if (node.operator !== "-" || argument.type !== "Literal" ||
+          typeof argument.value !== "number" || !Number.isFinite(argument.value)) {
+        rejectAst(source, node, "a numeric literal");
+      }
+      validateExpressionAst(source, argument, scope, depth + 1, budget, false, 0);
+      return;
+    }
+    case "MemberExpression":
+      if (node.optional === true || ++memberDepth > MAX_RENDER_UI_MEMBER_DEPTH) {
+        throw syntaxError(source, node.start,
+            "member access exceeds the " + MAX_RENDER_UI_MEMBER_DEPTH + "-read depth limit.");
+      }
+      enterSyntax(source, astNode(source, node.property, node, "property"), depth + 1, budget);
+      memberKey(source, node);
+      validateExpressionAst(source, astNode(source, node.object, node, "object"),
+          scope, depth + 1, budget, false, memberDepth);
+      return;
+    case "TemplateLiteral":
+      for (let quasi of astNodes(source, node.quasis, node, "quasis")) {
+        enterSyntax(source, quasi, depth + 1, budget);
+        if (quasi.type !== "TemplateElement") rejectAst(source, quasi, "a template literal");
+      }
+      for (let expression of astNodes(source, node.expressions, node, "expressions")) {
+        validateExpressionAst(source, expression, scope, depth + 1, budget, false, 0);
+      }
+      return;
+    case "CallExpression":
+      if (isBindCall(source, node)) {
+        if (!allowBind) {
+          throw syntaxError(source, node.start, "bind() is allowed only as a bindable prop value.");
+        }
+        let callee = astNode(source, node.callee, node, "callee");
+        enterSyntax(source, callee, depth + 1, budget);
+        let args = astNodes(source, node.arguments, node, "arguments");
+        if (node.optional === true || args.length !== 1 || args[0].type !== "Literal" ||
+            typeof args[0].value !== "string" || args[0].value.length === 0) {
+          throw syntaxError(source, node.start,
+              "bind() requires exactly one non-empty string literal path.");
+        }
+        enterSyntax(source, args[0], depth + 1, budget);
+        return;
+      }
+      if (isMapCall(source, node)) {
+        validateMapAst(source, node, scope, depth, budget);
+        return;
+      }
+      return rejectAst(source, node, "a call expression");
+    default:
+      return rejectAst(source, node, "an expression");
+  }
+}
+
+function tickEvaluation(context: EvaluationContext, node: AstNode, depth: number): void {
+  if (depth > MAX_RENDER_UI_DEPTH) {
+    throw syntaxError(context.source, node.start, "expression nesting exceeds the maximum depth.");
+  }
+  if (++context.budget.evaluations > MAX_RENDER_UI_EXPRESSION_EVALUATIONS) {
+    throw syntaxError(context.source, node.start,
+        "renderUI exceeds the " + MAX_RENDER_UI_EXPRESSION_EVALUATIONS +
+        "-evaluation expression budget.");
+  }
+}
+
+function boundedString(context: EvaluationContext, node: AstNode, value: string): string {
+  if (value.length > MAX_RENDER_UI_STRING_LENGTH) {
+    throw syntaxError(context.source, node.start,
+        "string exceeds the " + MAX_RENDER_UI_STRING_LENGTH + "-character limit.");
+  }
+  context.budget.producedStringBytes += sourceByteLength(value);
+  if (context.budget.producedStringBytes > MAX_RENDER_UI_TREE_BYTES) {
+    throw syntaxError(context.source, node.start,
+        "evaluated strings exceed the " + MAX_RENDER_UI_TREE_BYTES + "-byte aggregate limit.");
+  }
+  return value;
+}
+
+function evaluateLiteral(context: EvaluationContext, node: AstNode): JsonValue {
+  let value = literalValue(context.source, node);
+  return typeof value === "string" ? boundedString(context, node, value) : value;
+}
+
+function scalarString(context: EvaluationContext, node: AstNode, value: RuntimeValue): string {
+  if (value === null || typeof value === "boolean" || typeof value === "number" ||
+      typeof value === "string") {
+    return String(value);
+  }
+  throw syntaxError(context.source, node.start,
+      "string interpolation accepts only string, number, boolean, or null values.");
+}
+
+function readMember(
+    context: EvaluationContext, node: AstNode, object: RuntimeValue, key: string): RuntimeValue {
+  if (Array.isArray(object)) {
+    if (key === "length") return object.length;
+    if (!/^(0|[1-9][0-9]*)$/.test(key)) {
+      throw syntaxError(context.source, node.start,
+          "arrays expose only literal indices and .length.");
+    }
+    let index = Number(key);
+    if (index >= object.length) {
+      throw syntaxError(context.source, node.start, "array index " + index + " is out of bounds.");
+    }
+    return object[index];
+  }
+  if (typeof object === "string") {
+    if (key === "length") return object.length;
+    if (/^(0|[1-9][0-9]*)$/.test(key) && Number(key) < object.length) {
+      return boundedString(context, node, object[Number(key)]);
+    }
+    throw syntaxError(context.source, node.start,
+        "strings expose only literal indices and .length.");
+  }
+  if (object !== null && typeof object === "object" && !(EVALUATED_ELEMENT in object) &&
+      !Object.hasOwn(object, "$bind")) {
+    let record = object as RuntimeObject;
+    if (!Object.hasOwn(record, key)) {
+      throw syntaxError(context.source, node.start,
+          "unknown own data member " + JSON.stringify(key) + ".");
+    }
+    let value = record[key];
+    return typeof value === "string" ? boundedString(context, node, value) : value;
+  }
+  throw syntaxError(context.source, node.start,
+      "member access is allowed only on static data arrays, strings, and objects.");
+}
+
+function evaluateMap(
+    context: EvaluationContext, node: AstNode, depth: number): RuntimeValue[] {
+  let callee = astNode(context.source, node.callee, node, "callee");
+  let receiver = evaluateExpression(context,
+      astNode(context.source, callee.object, callee, "object"), depth + 1, false);
+  if (!Array.isArray(receiver)) {
+    throw syntaxError(context.source, node.start, ".map() receiver must be a static array.");
+  }
+  if (receiver.length > MAX_RENDER_UI_MAP_ITERATIONS - context.budget.mapIterations) {
+    throw syntaxError(context.source, node.start,
+        ".map() exceeds the " + MAX_RENDER_UI_MAP_ITERATIONS + "-iteration total limit.");
+  }
+  if (receiver.length > 0 &&
+      context.mapProduct > Math.floor(MAX_RENDER_UI_MAP_ITERATIONS / receiver.length)) {
+    throw syntaxError(context.source, node.start,
+        "nested .map() exceeds the " + MAX_RENDER_UI_MAP_ITERATIONS +
+        "-iteration product limit.");
+  }
+  context.budget.mapIterations += receiver.length;
+  let product = context.mapProduct * receiver.length;
+  let callback = astNodes(context.source, node.arguments, node, "arguments")[0];
+  let params = astNodes(context.source, callback.params, callback, "params");
+  let body = astNode(context.source, callback.body, callback, "body");
+  let results: RuntimeValue[] = [];
+  for (let index = 0; index < receiver.length; index++) {
+    let scope = new Map(context.scope);
+    scope.set(String(params[0].name), receiver[index]);
+    if (params[1]) scope.set(String(params[1].name), index);
+    results.push(evaluateExpression({...context, scope, mapProduct: product}, body, depth + 1, false));
+  }
+  return results;
+}
+
+function evaluateExpression(
+    context: EvaluationContext, node: AstNode, depth: number, allowBind: boolean): RuntimeValue {
+  tickEvaluation(context, node, depth);
+  switch (node.type) {
+    case "Literal":
+      return evaluateLiteral(context, node);
+    case "Identifier": {
+      let name = String(node.name);
+      if (!context.scope.has(name)) {
+        throw syntaxError(context.source, node.start, "Unknown identifier " + JSON.stringify(name) + ".");
+      }
+      let value = context.scope.get(name) as RuntimeValue;
+      return typeof value === "string" ? boundedString(context, node, value) : value;
+    }
+    case "ArrayExpression":
+      return (node.elements as unknown[]).map(element =>
+        evaluateExpression(context, element as AstNode, depth + 1, false));
+    case "ObjectExpression": {
+      let result: RuntimeObject = Object.create(null);
+      for (let property of astNodes(context.source, node.properties, node, "properties")) {
+        let keyNode = astNode(context.source, property.key, property, "key");
+        let key = assertSafeKey(context.source, keyNode,
+            objectKey(context.source, keyNode), "object");
+        if (Object.hasOwn(result, key)) {
+          throw syntaxError(context.source, property.start,
+              "duplicate object key " + JSON.stringify(key) + ".");
+        }
+        Object.defineProperty(result, key, {
+          value: evaluateExpression(context,
+              astNode(context.source, property.value, property, "value"), depth + 1, false),
+          enumerable: true,
+        });
+      }
+      return result;
+    }
+    case "JSXElement":
+      return evaluateElement(context, node, depth);
+    case "ConditionalExpression": {
+      let test = evaluateExpression(context,
+          astNode(context.source, node.test, node, "test"), depth + 1, false);
+      return evaluateExpression(context, astNode(context.source,
+          test ? node.consequent : node.alternate, node, test ? "consequent" : "alternate"),
+          depth + 1, allowBind);
+    }
+    case "LogicalExpression": {
+      let left = evaluateExpression(context,
+          astNode(context.source, node.left, node, "left"), depth + 1, false);
+      if (node.operator === "&&") {
+        return left ? evaluateExpression(context,
+            astNode(context.source, node.right, node, "right"), depth + 1, allowBind) : left;
+      }
+      return left ? left : evaluateExpression(context,
+          astNode(context.source, node.right, node, "right"), depth + 1, allowBind);
+    }
+    case "BinaryExpression": {
+      let left = evaluateExpression(context,
+          astNode(context.source, node.left, node, "left"), depth + 1, false);
+      let right = evaluateExpression(context,
+          astNode(context.source, node.right, node, "right"), depth + 1, false);
+      switch (node.operator) {
+        case "+":
+          if (typeof left !== "string" && typeof right !== "string") {
+            throw syntaxError(context.source, node.start,
+                "+ is string concatenation only; at least one operand must be a string.");
+          }
+          return boundedString(context, node,
+              scalarString(context, node, left) + scalarString(context, node, right));
+        case "===": return left === right;
+        case "!==": return left !== right;
+        case "<":
+        case ">":
+        case "<=":
+        case ">=": {
+          if (typeof left === "number" && typeof right === "number") {
+            if (node.operator === "<") return left < right;
+            if (node.operator === ">") return left > right;
+            if (node.operator === "<=") return left <= right;
+            return left >= right;
+          }
+          if (typeof left === "string" && typeof right === "string") {
+            if (node.operator === "<") return left < right;
+            if (node.operator === ">") return left > right;
+            if (node.operator === "<=") return left <= right;
+            return left >= right;
+          }
+          throw syntaxError(context.source, node.start,
+              "relational comparisons require two numbers or two strings.");
+        }
+      }
+      return rejectAst(context.source, node, "a binary expression");
+    }
+    case "UnaryExpression": {
+      let value = evaluateExpression(context,
+          astNode(context.source, node.argument, node, "argument"), depth + 1, false);
+      if (typeof value !== "number") return rejectAst(context.source, node, "a numeric literal");
+      return -value;
+    }
+    case "MemberExpression": {
+      let object = evaluateExpression(context,
+          astNode(context.source, node.object, node, "object"), depth + 1, false);
+      return readMember(context, node, object, memberKey(context.source, node));
+    }
+    case "TemplateLiteral": {
+      let quasis = astNodes(context.source, node.quasis, node, "quasis");
+      let expressions = astNodes(context.source, node.expressions, node, "expressions");
+      let result = "";
+      for (let index = 0; index < quasis.length; index++) {
+        let cooked = (quasis[index].value as {cooked?: unknown} | undefined)?.cooked;
+        if (typeof cooked !== "string") rejectAst(context.source, quasis[index], "a template literal");
+        result += cooked;
+        if (result.length > MAX_RENDER_UI_STRING_LENGTH) {
+          throw syntaxError(context.source, node.start,
+              "template string exceeds the " + MAX_RENDER_UI_STRING_LENGTH + "-character limit.");
+        }
+        if (index < expressions.length) {
+          result += scalarString(context, expressions[index],
+              evaluateExpression(context, expressions[index], depth + 1, false));
+        }
+      }
+      return boundedString(context, node, result);
+    }
+    case "CallExpression":
+      if (isBindCall(context.source, node) && allowBind) {
+        let argument = astNodes(context.source, node.arguments, node, "arguments")[0];
+        return {$bind: String(argument.value)};
+      }
+      if (isMapCall(context.source, node)) return evaluateMap(context, node, depth);
+      return rejectAst(context.source, node, "a call expression");
+    default:
+      return rejectAst(context.source, node, "an expression");
+  }
+}
+
+function appendChild(
+    context: EvaluationContext, sourceNode: AstNode, value: RuntimeValue,
+    children: Array<GenerativeUiNode | string>): void {
+  if (value === null || typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    for (let item of value) appendChild(context, sourceNode, item, children);
+    return;
+  }
+  if (typeof value === "string") {
+    children.push(value);
+    return;
+  }
+  if (typeof value === "number") {
+    children.push(boundedString(context, sourceNode, String(value)));
+    return;
+  }
+  if (EVALUATED_ELEMENT in value) {
+    children.push(value.node);
+    return;
+  }
+  throw syntaxError(context.source, sourceNode.start,
+      "JSX children must evaluate to elements, arrays of children, scalars, or null/boolean.");
+}
+
+function evaluateAttribute(
+    context: EvaluationContext, attribute: AstNode, depth: number): [string, RuntimeValue] {
+  let name = jsxName(context.source, attribute.name, attribute);
+  if (attribute.value === null) return [name, true];
+  let value = astNode(context.source, attribute.value, attribute, "value");
+  if (value.type === "Literal") return [name, evaluateExpression(context, value, depth + 1, false)];
+  let expression = astNode(context.source, value.expression, value, "expression");
+  return [name, evaluateExpression(context, expression, depth + 1, true)];
+}
+
+function evaluateElement(
+    context: EvaluationContext, element: AstNode, depth: number): EvaluatedElement {
+  tickEvaluation(context, element, depth);
+  if (++context.budget.emittedNodes > MAX_RENDER_UI_NODES) {
+    throw syntaxError(context.source, element.start,
+        "renderUI tree exceeds the " + MAX_RENDER_UI_NODES + "-node limit.");
+  }
+  let opening = astNode(context.source, element.openingElement, element, "openingElement");
+  let type = jsxName(context.source, opening.name, opening);
+  let props: Record<string, unknown> = Object.create(null);
+  for (let attribute of astNodes(context.source, opening.attributes, opening, "attributes")) {
+    let [name, value] = evaluateAttribute(context, attribute, depth + 1);
     Object.defineProperty(props, name, {value, enumerable: true});
   }
-
   let children: Array<GenerativeUiNode | string> = [];
-  for (let child of astNodes(source, element.children, element, "children")) {
+  for (let child of astNodes(context.source, element.children, element, "children")) {
     if (child.type === "JSXText") {
-      enterAst(source, child, depth + 1, budget);
-      let childText = jsxText(child.value);
-      if (childText.trim()) children.push(childText);
+      let value = jsxText(child.value);
+      if (value.trim()) children.push(boundedString(context, child, value));
       continue;
     }
     if (child.type === "JSXElement") {
-      children.push(interpretElement(source, child, depth + 1, budget));
+      appendChild(context, child, evaluateElement(context, child, depth + 1), children);
       continue;
     }
-    if (child.type === "JSXExpressionContainer") {
-      enterAst(source, child, depth + 1, budget);
-      let expression = astNode(source, child.expression, child, "expression");
-      if (expression.type === "JSXEmptyExpression") continue;
-      let interpreted = interpretChildExpression(source, expression, depth + 2, budget);
-      if (interpreted !== null) children.push(interpreted);
-      continue;
+    let expression = astNode(context.source, child.expression, child, "expression");
+    if (expression.type !== "JSXEmptyExpression") {
+      appendChild(context, expression,
+          evaluateExpression(context, expression, depth + 1, false), children);
     }
-    rejectAst(source, child, "JSX children");
   }
-  return {type, props, children};
+  return {[EVALUATED_ELEMENT]: true, node: {type, props, children}};
 }
 
-function parseRootElement(source: string): GenerativeUiNode {
+function parseRootExpression(source: string): AstNode {
   let program: AstNode;
   try {
     program = JsxParser.parse(source, {
@@ -488,10 +939,8 @@ function parseRootElement(source: string): GenerativeUiNode {
         "expected exactly one root catalog element; received " + received + ".");
   }
   let expression = astNode(source, body[0].expression, body[0], "expression");
-  if (expression.type !== "JSXElement") {
-    return rejectAst(source, expression, "the renderUI root");
-  }
-  return interpretElement(source, expression, 0, {count: 0});
+  validateExpressionAst(source, expression, new Set(["data"]), 0, {count: 0}, false, 0);
+  return expression;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -508,7 +957,10 @@ function assertJsonValue(value: unknown, path: string, depth = 0): asserts value
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJsonValue(item, `${path}[${index}]`, depth + 1));
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) throw new Error(`${path}[${index}] is missing.`);
+      assertJsonValue(value[index], `${path}[${index}]`, depth + 1);
+    }
     return;
   }
   if (!isPlainRecord(value)) throw new Error(`${path} is not JSON.`);
@@ -704,20 +1156,45 @@ export function validateRenderUINode(value: unknown): GenerativeUiNode {
   return validateNode(value, "tree", 0, {count: 0});
 }
 
-/** Parse the literal-only JSX subset and return the validated durable wire result. */
+/** Interpret bounded JSX expressions over static JSON and return the validated durable wire result. */
 export async function parseRenderUIJsx(
     jsxSource: string,
-    stateDefaults: Record<string, unknown> = {}): Promise<GenerativeUiResult> {
+    stateDefaults: Record<string, unknown> = {},
+    data: unknown = null): Promise<GenerativeUiResult> {
   let sourceBytes = sourceByteLength(jsxSource);
   if (sourceBytes > MAX_RENDER_UI_SOURCE_BYTES) {
     throw new Error(`renderUI JSX exceeds the ${MAX_RENDER_UI_SOURCE_BYTES}-byte source limit.`);
   }
   if (!jsxSource.trim()) throw new Error("renderUI JSX cannot be empty.");
   assertJsonValue(stateDefaults, "state");
+  let trustedData = structuredClone(data);
+  assertJsonValue(trustedData, "data");
+  if (sourceByteLength(JSON.stringify(trustedData)) > MAX_RENDER_UI_DATA_BYTES) {
+    throw new Error(`renderUI data exceeds the ${MAX_RENDER_UI_DATA_BYTES}-byte limit.`);
+  }
+
+  let expression = parseRootExpression(jsxSource);
+  let budget: EvaluationBudget = {
+    evaluations: 0,
+    emittedNodes: 0,
+    mapIterations: 0,
+    producedStringBytes: 0,
+  };
+  let evaluated = evaluateExpression({
+    source: jsxSource,
+    scope: new Map([["data", trustedData]]),
+    budget,
+    mapProduct: 1,
+  }, expression, 0, false);
+  if (evaluated === null || typeof evaluated !== "object" ||
+      !(EVALUATED_ELEMENT in evaluated)) {
+    throw syntaxError(jsxSource, expression.start,
+        "the renderUI root must evaluate to exactly one catalog element.");
+  }
 
   // The interpreter already consults the catalog while walking the AST. Reconstructing the tree
   // here is deliberately redundant: persistence never trusts even its own first-pass output.
-  let tree = validateRenderUINode(parseRootElement(jsxSource));
+  let tree = validateRenderUINode(evaluated.node);
   let treeBytes = sourceByteLength(JSON.stringify(tree));
   if (treeBytes > MAX_RENDER_UI_TREE_BYTES) {
     throw new Error(`renderUI tree exceeds the ${MAX_RENDER_UI_TREE_BYTES}-byte tree limit.`);
