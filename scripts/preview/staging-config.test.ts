@@ -244,20 +244,18 @@ test("no config names a resource belonging to another deployment", () => {
   }
 });
 
-test("the backend is told the router's origin, and nothing else", () => {
+test("the backend is told the router's origin and closes password auth", () => {
   const { configs } = buildAll();
   const vars = previewsOf(configs, "workshop-backend").vars;
   assert.ok(vars, "the backend preview declares no vars");
 
-  // The origin is the only value the backend needs that is safe to write into a config Wrangler
-  // will print; its admins and Access pair are uploaded as secrets instead (below).
-  assert.deepEqual(Object.keys(vars), ["PUBLIC_BASE_URL"]);
+  // Both values are safe to print; admins and the Access pair are uploaded as secrets instead.
+  assert.deepEqual(Object.keys(vars).toSorted(), ["DISABLE_PASSWORD_AUTH", "PUBLIC_BASE_URL"]);
+  assert.equal(vars.DISABLE_PASSWORD_AUTH, "true");
   assert.equal(vars.PUBLIC_BASE_URL, BASE_URL);
-  // Access bootstrap is additive, so password auth needs no special preview override.
-  assert.equal(vars.DISABLE_PASSWORD_AUTH, undefined);
 });
 
-test("the backend's secrets are the admin list, the Access pair and the AI gateway", () => {
+test("the backend's secrets carry Access, admin and AI settings", () => {
   // A secret is always text, so the admin list travels as JSON — the form `#isAdmin()` already
   // parses. Everything here is uploaded by preview.ts, never written to a config.
   assert.deepEqual(SECRETS, {

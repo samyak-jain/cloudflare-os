@@ -89,10 +89,11 @@ describe('useAuth error reporting identity', () => {
   async function mount(
     publicApi: RpcStub<PublicApi>,
     hook: typeof useAuth = useAuth,
+    accessAuthEnabled: boolean | null = false,
   ): Promise<{ controls: Controls; root: Root }> {
     const captured: { controls?: Controls } = {}
     function Consumer() {
-      const { login, logout } = hook(publicApi)
+      const { login, logout } = hook(publicApi, accessAuthEnabled)
       captured.controls = { login, logout }
       return null
     }
@@ -125,29 +126,29 @@ describe('useAuth error reporting identity', () => {
   })
 
   it('names the user when Access authenticates without an app token', async () => {
-    await mount(stubPublicApi(undefined, person))
+    await mount(stubPublicApi(undefined, person), useAuth, true)
 
     expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
   })
 
-  it('discards a stale stored app session when Access succeeds', async () => {
-    localStorage.setItem('authToken', 'stale-token')
-    const authenticate = vi.fn<(token: string) => void>()
+  it('keeps the stored-session fast path without attempting Access', async () => {
+    localStorage.setItem('authToken', 'stored-token')
+    const authenticateFromCfAccess = vi.fn<() => void>()
     const api = {
-      authenticateFromCfAccess: () => ({
+      authenticateFromCfAccess,
+      authenticate: () => ({
         whoami: async () => person,
         [Symbol.dispose]: () => {},
       }),
-      authenticate,
     } as unknown as RpcStub<PublicApi>
 
-    await mount(api)
+    await mount(api, useAuth, true)
 
-    expect(authenticate).not.toHaveBeenCalled()
-    expect(localStorage.getItem('authToken')).toBeNull()
+    expect(authenticateFromCfAccess).not.toHaveBeenCalled()
+    expect(localStorage.getItem('authToken')).toBe('stored-token')
   })
 
-  it('attempts Access before a stored app session', async () => {
+  it('never serializes Access ahead of a stored app session', async () => {
     const calls: string[] = []
     localStorage.setItem('authToken', 'stored-token')
     const api = {
@@ -164,17 +165,28 @@ describe('useAuth error reporting identity', () => {
       },
     } as unknown as RpcStub<PublicApi>
 
-    await mount(api)
+    await mount(api, useAuth, true)
 
-    expect(calls).toEqual(['access', 'session'])
+    expect(calls).toEqual(['session'])
     expect(setReportedUserId).toHaveBeenCalledExactlyOnceWith('person@example.com')
   })
 
   it('falls back to the signed-out state when Access is unavailable', async () => {
-    await mount(stubPublicApi())
+    await mount(stubPublicApi(), useAuth, true)
 
     expect(setReportedUserId).not.toHaveBeenCalled()
     expect(localStorage.getItem('authToken')).toBeNull()
+  })
+
+  it('does not call the Access RPC when the server reports the feature off', async () => {
+    const authenticateFromCfAccess = vi.fn<() => never>(() => {
+      throw new Error('must not be called')
+    })
+    const api = { authenticateFromCfAccess } as unknown as RpcStub<PublicApi>
+
+    await mount(api)
+
+    expect(authenticateFromCfAccess).not.toHaveBeenCalled()
   })
 
   it('keeps the identity when one instance unmounts while another stays mounted', async () => {

@@ -13,6 +13,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { useServerConfig, useServerConfigError } from '../ServerConfigContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -21,6 +22,8 @@ export const Route = createRootRoute({
 function RootComponent() {
   const rpcStub = useRpcStub()
   const connectionLost = useConnectionLost()
+  const serverConfig = useServerConfig()
+  const serverConfigError = useServerConfigError()
   const { isAuthenticated, authenticatedApi, isLoading, error, logout, login } = useAuth(rpcStub)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
 
@@ -31,7 +34,8 @@ function RootComponent() {
   // A standalone (no app shell) render is used only for signed-out visitors of public routes.
   // Signed-in users get the full app chrome so public pages (esp. the blueprint detail) feel
   // native — sidebar and all — instead of floating on a bare page.
-  const standalone = !isAuthenticated && (isSignup || isBlueprint)
+  const accessAuthEnabled = serverConfig?.accessAuthEnabled ?? (serverConfigError ? false : null)
+  const standalone = !isAuthenticated && accessAuthEnabled === false && (isSignup || isBlueprint)
 
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
   // here so the chrome doesn't flash in during the redirect to /workspace/.
@@ -45,7 +49,7 @@ function RootComponent() {
   }
 
   // Loading state
-  if (isLoading) {
+  if (isLoading && !standalone) {
     return (
       <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />

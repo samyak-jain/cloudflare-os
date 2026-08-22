@@ -369,12 +369,12 @@ function applyBackend(
   // every deployed backend (webFetch's toMarkdown conversion depends on it).
   config.ai = { binding: "WORKERS_AI" };
   config.services = backendGatekeeperServices(gatekeepers, baseUrl);
-  // The origin is the only value the backend needs that is safe to write down here: ADMINS and the
-  // Cloudflare Access pair are uploaded as *secrets* instead, out of band, because Wrangler prints
-  // every plain-text var's value in its deploy summary and this workflow's logs are public. See
-  // {@link backendSecrets} and preview.ts.
+  // The origin and password-auth kill switch are safe to print. ADMINS and the Cloudflare Access
+  // pair are uploaded as *secrets* instead, out of band, because Wrangler prints every plain-text
+  // var's value in its deploy summary and this workflow's logs are public. See backendSecrets().
   config.vars = {
     ...config.vars,
+    DISABLE_PASSWORD_AUTH: "true",
     PUBLIC_BASE_URL: baseUrl,
   };
   config.previews = {
@@ -529,9 +529,9 @@ export interface AccessConfig {
  *
  * Required, like {@link resolveTarget}'s pair and for the same reasons. A preview is a public
  * workers.dev URL holding real gatekeeper capabilities, and an unset pair does not fail — the
- * backend can verify no assertion (access.ts) and quietly falls back to password signup — so this
- * fails closed rather than deploying an instance whose auth silently differs. The two move together
- * because verifying an assertion needs both, and either one alone verifies nothing.
+ * backend treats either configured value as an enabled Access deployment and rejects `/api` when
+ * it cannot verify an assertion. Requiring the complete pair here turns that fail-closed outage
+ * into a deploy-time error. The two move together because verifying an assertion needs both.
  *
  * The environment is read in the parameter defaults rather than the body so that
  * env-passthrough.test.js, whose discovery is textual, can see both names.
@@ -548,8 +548,7 @@ export function resolveAccess({
       ...(teamDomain ? [] : ["ACCESS_TEAM_DOMAIN"]),
     ];
     throw new Error(`${missing.join(" and ")} must be set: together they name the Cloudflare ` +
-        "Access application that authenticates a preview, and a preview deployed without it " +
-        "would fall back to password signup on a public URL");
+        "Access application that authenticates a preview; public previews require this gate");
   }
   if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+cloudflareaccess\.com$/.test(
       teamDomain)) {
@@ -654,8 +653,8 @@ export function resolveAiGateway({
  * uploads these over stdin instead, with `wrangler preview secret bulk`, which prints names and
  * `********`.
  *
- * Access bootstrap is additive to the normal login fallback, so previews do not need a separate
- * frontend build or password-auth variable.
+ * Access is the preview's exclusive authentication boundary. Its non-secret password-auth kill
+ * switch is written by applyBackend(); only the values that identify the deployment travel here.
  */
 export function backendSecrets({
   admins = resolveAdmins(),

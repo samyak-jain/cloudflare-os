@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { useServerConfig, useServerConfigError } from './ServerConfigContext'
 
 interface AuthState {
   token: string | null
@@ -11,7 +12,15 @@ interface AuthState {
   error: string | null
 }
 
-export function useAuth(publicApi: RpcStub<PublicApi>) {
+export function useAuth(
+  publicApi: RpcStub<PublicApi>,
+  accessAuthOverride?: boolean | null,
+) {
+  const serverConfig = useServerConfig()
+  const serverConfigError = useServerConfigError()
+  const accessAuthEnabled = accessAuthOverride === undefined
+    ? (serverConfig?.accessAuthEnabled ?? (serverConfigError ? false : null))
+    : accessAuthOverride
   const [authState, setAuthState] = useState<AuthState>({
     token: null,
     authenticatedApi: null,
@@ -56,33 +65,6 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
         return { token: null, authenticatedApi: null, source: null, isLoading: true, error: null }
       })
 
-      // The same frontend build serves Access production and ordinary local development. Always
-      // try Access first. Await the capability-producing call itself so an expected auth rejection
-      // is handled once (a rejected pipelined future can otherwise also surface independently).
-      let accessApi: RpcStub<AuthenticatedApi> | undefined
-      try {
-        accessApi = await publicApi.authenticateFromCfAccess()
-        if (!isCurrent()) {
-          accessApi[Symbol.dispose]()
-          return
-        }
-        // An app session left from before Access was enabled must not survive as a second identity
-        // path on this origin. Access will be attempted again on the next connection.
-        localStorage.removeItem('authToken')
-        setAuthState({
-          token: null,
-          authenticatedApi: accessApi,
-          source: 'access',
-          isLoading: false,
-          error: null,
-        })
-        return
-      } catch {
-        accessApi?.[Symbol.dispose]()
-      }
-
-      if (!isCurrent()) return
-
       const storedToken = localStorage.getItem('authToken')
       if (storedToken) {
         let sessionApi: RpcStub<AuthenticatedApi> | undefined
@@ -106,6 +88,34 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
         }
       }
 
+      if (!isCurrent() || accessAuthEnabled === null) return
+
+      // A stored session stays on the original pipelined fast path above. Without one, the same
+      // bundle attempts Access only when getServerConfig() says the deployment enabled it, so
+      // ordinary/local deployments pay no guaranteed-failing authentication round trip.
+      if (accessAuthEnabled) {
+        let accessApi: RpcStub<AuthenticatedApi> | undefined
+        try {
+          // Await the capability-producing call itself so an expected auth rejection is handled
+          // once (a rejected pipelined future can otherwise surface independently).
+          accessApi = await publicApi.authenticateFromCfAccess()
+          if (!isCurrent()) {
+            accessApi[Symbol.dispose]()
+            return
+          }
+          setAuthState({
+            token: null,
+            authenticatedApi: accessApi,
+            source: 'access',
+            isLoading: false,
+            error: null,
+          })
+          return
+        } catch {
+          accessApi?.[Symbol.dispose]()
+        }
+      }
+
       if (isCurrent()) {
         setAuthState({
           token: null,
@@ -122,7 +132,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       if (isCurrent()) authAttemptRef.current++
       authenticatedApiRef.current?.[Symbol.dispose]()
     }
-  }, [publicApi])
+  }, [accessAuthEnabled, publicApi])
 
   const authenticateWithToken = (token: string) => {
     authAttemptRef.current++
