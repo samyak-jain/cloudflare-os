@@ -1,114 +1,205 @@
 /**
- * The avatar view: inlines `art/lena.svg` and drives it from an `AvatarStateSnapshot`.
+ * The avatar view: one baked portrait per state, cross-dissolved on every state change.
  *
  * Presentational only -- it does not know where the state came from, which is what keeps the
  * renderer swappable (see `state.ts`). `ChatAvatar.tsx` is the piece that binds it to the chat.
+ *
+ * ## Why a crossfade and not a rig
+ *
+ * v1 drove a hand-authored SVG skeleton. The states were legible in the code and nearly identical
+ * on screen, because the ceiling was the authoring method, not the rig. The v2 art is eleven
+ * image-model *edits of one anchor frame*, so the whole set registers within a few pixels: eyes,
+ * hair silhouette and coat all land in the same place. That property is what makes a plain opacity
+ * cross-dissolve read as Lena moving rather than as two pictures swapping -- the only things that
+ * actually change across the dissolve are the parts the art changed.
+ *
+ * ## Motion
+ *
+ * Everything that moves here is a CSS animation on a `transform` or an `opacity`, so it runs on
+ * the compositor and costs no main-thread time at all: no rAF loop, no per-frame attribute writes,
+ * nothing for React to re-render. (v1's rAF renderer measured 0.69 % of a main thread at idle,
+ * almost all of it rasterizing the SVG. A composited transform on an already-decoded 384 px raster
+ * is well under that.) The browser also throttles these on its own while the tab is hidden.
+ *
+ * Two layers of life, both chosen because they work on a *static* frame -- no blink, because the
+ * art has open eyes baked in and faking one would need a second frame per state:
+ *
+ * - **Breathing.** A ~4.6 s scale oscillation of well under a pixel at 96 px. Invisible when you
+ *   look at it and unmistakable when it stops.
+ * - **The bob.** A slow head-tilt every ~11 s, at rest for most of the cycle. A continuous bob
+ *   reads as a bouncing GIF; one that mostly sits still reads as someone sitting there.
+ *
+ * Both are shaped so they can never uncover the backdrop inside the circle crop, which is why the
+ * bob is a rotation and not a translation. The distance from a square's centre to each of its edges
+ * does not change when it rotates, so a square rotated about its centre always still contains its
+ * own inscribed circle -- whereas any translation slides an edge across the crop and exposes a
+ * crescent of background. For the same reason `breathe` scales from the *top* edge (`50% 0%`): it
+ * grows down and outward and never lifts the top of the head into the crop. `BOB_MARGIN` covers the
+ * four points where a pure rotation is exactly tangent to the circle.
+ *
+ * Under `prefers-reduced-motion: reduce` both stop and the crossfade becomes a cut.
  */
 
-import { useEffect, useId, useRef, useState } from "react";
-import { CROP_VIEWBOX, LenaRig, namespaceRigIds } from "./rig";
-import { SvgAvatarRenderer } from "./renderer";
-import { describeAvatarState, IDLE_SNAPSHOT, type AvatarStateSnapshot } from "./state";
+import { useEffect, useRef, useState } from "react";
+import type { AvatarPortraitKey } from "./portraits";
+import { describeAvatarState, type AvatarStateSnapshot } from "./state";
+
+/** Crossfade duration. Long enough to read as a dissolve, short enough to keep the UI responsive. */
+const CROSSFADE_MS = 260;
+
+/** Breathing period (one direction; the animation alternates, so a full breath is twice this). */
+const BREATHE_S = 4.6;
+
+/** Bob period. Most of it is the rest hold in the keyframes below. */
+const BOB_S = 11;
 
 /**
- * `lena-backdrop`'s own radial, re-projected onto the padded crop box.
+ * Uniform scale carried by the bob, so a rotation that is exactly tangent to the circle crop
+ * cannot leave an antialiased hairline of backdrop at the four tangent points.
+ */
+const BOB_MARGIN = 1.006;
+
+/**
+ * Cap on stacked crossfade layers.
  *
- * The art's gradient is `cx=0.5 cy=0.4 r=0.75` over its 512 rect; inside `CROP_VIEWBOX`'s 546 box
- * that centre lands at (50%, 43.7%) with a radius of 70.3%. Matching it exactly matters because
- * the inset leaves a thin band of this background visible around the art at the sides and top --
- * off by a few levels and that band reads as a rim rather than as more backdrop. It also makes the
- * loading placeholder a continuation of the avatar rather than a different graphic.
+ * Each state change pushes a layer that fades in over the ones below and then collapses the stack
+ * on `animationend`. States changing faster than the fade can therefore stack -- `mapping.ts`'s
+ * dwell hysteresis makes that rare, but "rare" is not "never" and an uncapped stack is a leak.
+ * Anything below the top few layers is fully covered.
+ */
+const MAX_LAYERS = 4;
+
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+
+/**
+ * The art's own backdrop, as a CSS gradient, sampled from the frames.
+ *
+ * Shown before the art chunk lands, so the load is a fill-in rather than a flash of empty circle.
+ * The frames are opaque and cover the whole crop, so this is never visible once they are up.
  */
 const BACKDROP =
-  "radial-gradient(ellipse 70.3% 70.3% at 50% 43.7%, #fcfbff 0%, #eee9f8 58%, #d5cceb 100%)";
+  "radial-gradient(circle at 50% 42%, #f2ecf9 0%, #e3dcf1 56%, #d0cae6 100%)";
+
+const MOTION_STYLE_ID = "lena-avatar-motion";
+
+/**
+ * The keyframes, injected once into `document.head`.
+ *
+ * A `<style>` element rather than a stylesheet import because the QA harness page loads no CSS at
+ * all, and an avatar that only breathes inside the app is an avatar whose motion never gets
+ * reviewed. Inline styles cannot express `@keyframes`, so this is the cheap way to have both.
+ */
+const MOTION_KEYFRAMES = `
+@keyframes lena-portrait-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes lena-breathe { from { transform: scale(1) } to { transform: scale(1.018) } }
+@keyframes lena-bob {
+  0%, 58% { transform: scale(${BOB_MARGIN}) rotate(0deg) }
+  73% { transform: scale(${BOB_MARGIN}) rotate(-1.1deg) }
+  87% { transform: scale(${BOB_MARGIN}) rotate(0.3deg) }
+  100% { transform: scale(${BOB_MARGIN}) rotate(0deg) }
+}
+`;
+
+function ensureMotionKeyframes(): void {
+  if (typeof document === "undefined") return;
+  if (document.getElementById(MOTION_STYLE_ID) !== null) return;
+  const style = document.createElement("style");
+  style.id = MOTION_STYLE_ID;
+  style.textContent = MOTION_KEYFRAMES;
+  document.head.append(style);
+}
+
+/** `override` wins when given, so the harness can preview reduced motion without OS settings. */
+function usePrefersReducedMotion(override?: boolean): boolean {
+  const [preferred, setPreferred] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(REDUCED_MOTION_QUERY);
+    setPreferred(media.matches);
+    const onChange = (event: MediaQueryListEvent) => setPreferred(event.matches);
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  return override ?? preferred;
+}
+
+/** One drawn frame on the stack. `id` rather than the key, so a repeat of a state gets its own. */
+type PortraitLayer = { id: number; portrait: AvatarPortraitKey; src: string };
+
+type ArtModule = typeof import("./portraits");
 
 export type LenaAvatarProps = {
   snapshot: AvatarStateSnapshot;
   /**
-   * Rendered diameter in CSS pixels. RIG.md §5 verifies the art down to 64 px and calls 96 px
-   * "still comfortable"; below 64 the mouth stops reading at all.
+   * Rendered diameter in CSS pixels. The art is vendored at 384 px, so anything up to 384 is
+   * sharp on a 1x display and up to 192 on a 2x one; the chat header asks for 96.
    */
   size?: number;
   className?: string;
+  /** Force reduced motion on or off. Unset (the default) follows the OS setting. QA only. */
+  reducedMotion?: boolean;
 };
 
 export default function LenaAvatar(
-  { snapshot, size = 96, className = "" }: LenaAvatarProps,
+  { snapshot, size = 96, className = "", reducedMotion }: LenaAvatarProps,
 ) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const rendererRef = useRef<SvgAvatarRenderer | null>(null);
-  const mediaCleanup = useRef<(() => void) | null>(null);
-  /**
-   * The renderer is constructed inside an async import, so it needs the snapshot as of *that*
-   * moment rather than the one captured when the mount effect ran.
-   */
-  const snapshotRef = useRef<AvatarStateSnapshot>(IDLE_SNAPSHOT);
-  snapshotRef.current = snapshot;
+  const [art, setArt] = useState<ArtModule | null>(null);
+  const [layers, setLayers] = useState<PortraitLayer[]>([]);
+  const nextLayerId = useRef(0);
+  const still = usePrefersReducedMotion(reducedMotion);
 
-  const [loaded, setLoaded] = useState(false);
+  useEffect(ensureMotionKeyframes, []);
 
-  // React's `useId` produces colons, which are legal in XML but awkward in selectors and in
-  // `url(#...)`. Strip to an identifier-safe fragment.
-  const instance = useId().replace(/[^A-Za-z0-9_-]/g, "");
-
-  // Mount: fetch the art, inline it, bind the rig, start the loop. The SVG is a dynamic import so
-  // its ~32 KB stays out of the initial bundle -- which is also what gives the placeholder below
-  // something real to cover.
+  // The art table is a dynamic import so its eleven asset URLs -- and the ~310 KB behind them --
+  // stay out of the initial bundle. It pulls the whole set into the browser cache on arrival, so
+  // that after this one await no state change can ever dissolve into a half-loaded frame.
   useEffect(() => {
     let cancelled = false;
-    let renderer: SvgAvatarRenderer | null = null;
-
-    void import("./art/lena.svg?raw").then(({ default: markup }) => {
-      const host = hostRef.current;
-      if (cancelled || host === null) return;
-
-      host.innerHTML = namespaceRigIds(markup, instance);
-      const svg = host.querySelector("svg");
-      if (svg === null) return;
-      // The art is authored at a fixed 512; let the box decide the size.
-      svg.setAttribute("width", "100%");
-      svg.setAttribute("height", "100%");
-      // Inset the art so the ahoge survives the circle crop -- see CROP_VIEWBOX.
-      svg.setAttribute("viewBox", CROP_VIEWBOX);
-      svg.style.display = "block";
-
-      const rig = new LenaRig(host, instance);
-      if (rig.missing.length > 0) {
-        console.warn("[avatar] rig ids missing from lena.svg:", rig.missing.join(", "));
-      }
-
-      const media = typeof window.matchMedia === "function"
-        ? window.matchMedia("(prefers-reduced-motion: reduce)")
-        : null;
-
-      renderer = new SvgAvatarRenderer(rig, { reducedMotion: media?.matches ?? false });
-      rendererRef.current = renderer;
-      renderer.setState(snapshotRef.current);
-      renderer.start();
-      setLoaded(true);
-
-      const onChange = (event: MediaQueryListEvent) => renderer?.setReducedMotion(event.matches);
-      media?.addEventListener("change", onChange);
-      mediaCleanup.current = () => media?.removeEventListener("change", onChange);
+    void import("./portraits").then((module) => {
+      if (cancelled) return;
+      module.preloadAvatarPortraits();
+      setArt(module);
     });
-
     return () => {
       cancelled = true;
-      mediaCleanup.current?.();
-      mediaCleanup.current = null;
-      renderer?.destroy();
-      rendererRef.current = null;
-      if (hostRef.current !== null) hostRef.current.innerHTML = "";
     };
-    // `instance` is stable for the component's lifetime; the art never changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instance]);
+  }, []);
+
+  const portrait = art === null ? null : art.portraitKeyFor(snapshot.state);
 
   useEffect(() => {
-    rendererRef.current?.setState(snapshot);
-  }, [snapshot]);
+    if (art === null || portrait === null) return;
+    setLayers((previous) => {
+      if (previous[previous.length - 1]?.portrait === portrait) return previous;
+      const layer = {
+        id: nextLayerId.current++,
+        portrait,
+        src: art.AVATAR_PORTRAITS[portrait],
+      };
+      return still ? [layer] : [...previous, layer].slice(-MAX_LAYERS);
+    });
+  }, [art, portrait, still]);
+
+  // Turning reduced motion on mid-dissolve: drop to the destination frame rather than letting the
+  // fade that is already running finish.
+  useEffect(() => {
+    if (!still) return;
+    setLayers((previous) => (previous.length > 1 ? previous.slice(-1) : previous));
+  }, [still]);
+
+  /** Collapse the stack once the top layer is fully opaque; ignore fades overtaken by a newer one. */
+  const onLayerShown = (id: number) => {
+    setLayers((previous) => (
+      previous[previous.length - 1]?.id === id && previous.length > 1
+        ? previous.slice(-1)
+        : previous
+    ));
+  };
 
   const label = `Lena — ${describeAvatarState(snapshot.state)}`;
+  const motion = still ? undefined : "transform";
 
   return (
     <div
@@ -121,30 +212,65 @@ export default function LenaAvatar(
         background: BACKDROP,
         borderRadius: "50%",
         overflow: "hidden",
+        // Safari otherwise paints the composited layers below over the rounded corners.
+        isolation: "isolate",
       }}
       role="img"
       aria-label={label}
       title={label}
       data-avatar-state={snapshot.state.kind}
       data-avatar-work={snapshot.state.kind === "working" ? snapshot.state.work : undefined}
+      data-avatar-portrait={portrait ?? undefined}
+      data-avatar-still={still ? "true" : undefined}
     >
-      {/*
-        Static circle-crop placeholder, shown until the art chunk lands. It is the backdrop disc
-        the art itself sits on (RIG.md §4), so the transition is a fill-in rather than a swap.
-      */}
-      {!loaded && (
+      {/* Bob outside breathe: two animations, both on `transform`, so they cannot share a node. */}
+      <div
+        aria-hidden
+        data-avatar-motion="bob"
+        style={{
+          width: "100%",
+          height: "100%",
+          willChange: motion,
+          animation: still ? undefined : `${BOB_S}s lena-bob ease-in-out infinite`,
+        }}
+      >
         <div
-          aria-hidden
+          data-avatar-motion="breathe"
           style={{
-            position: "absolute",
-            inset: 0,
-            borderRadius: "50%",
-            background: BACKDROP,
-            boxShadow: "inset 0 0 0 1px rgba(154,144,180,0.28)",
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            willChange: motion,
+            transformOrigin: "50% 0%",
+            animation: still
+              ? undefined
+              : `${BREATHE_S}s lena-breathe ease-in-out infinite alternate`,
           }}
-        />
-      )}
-      <div ref={hostRef} style={{ width: "100%", height: "100%" }} aria-hidden />
+        >
+          {layers.map((layer) => (
+            <img
+              key={layer.id}
+              src={layer.src}
+              alt=""
+              draggable={false}
+              data-avatar-layer={layer.portrait}
+              onAnimationEnd={() => onLayerShown(layer.id)}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                // The filter belongs to the frame, so it dissolves in and out with it.
+                filter: art?.AVATAR_PORTRAIT_FILTERS[layer.portrait],
+                animation: still
+                  ? undefined
+                  : `${CROSSFADE_MS}ms lena-portrait-in cubic-bezier(0.33, 0, 0.2, 1) both`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

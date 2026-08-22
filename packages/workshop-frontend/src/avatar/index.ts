@@ -6,14 +6,12 @@
  *   `state.ts`      the abstract `AvatarState` union, the renderer-agnostic seam
  *   `mapping.ts`    `AiChatStreamEvent` + turn boundaries -> `AvatarState`, with hysteresis
  *   `controller.ts` the sink the existing chat subscriber feeds; publishes snapshots
- *   `rig.ts`        `art/RIG.md` as code: origins, safe ranges, transform composition
- *   `poses.ts`      RIG.md §3 per-state motion, as pure functions of time
- *   `renderer.ts`   the rAF loop: smoothing, blinks, visemes, reduced motion
- *   `LenaAvatar`    inlines the SVG and drives the rig
+ *   `portraits.ts`  the art table: `AvatarState` -> one of eleven baked frames
+ *   `LenaAvatar`    cross-dissolves between frames, plus compositor-only breathing and bob
  *   `ChatAvatar`    binds a controller to `LenaAvatar`
  *
- * Art is vendored under `art/` from `lena-avatar-chibi@a57bcf9`. `python3 art/verify.py` validates
- * the rig contract the code here depends on.
+ * Art is vendored under `art/` as 384 px WebP, baked from the chibi track of the v2 bake-off.
+ * `python3 art/build-art.py` re-vendors it from the masters and rebuilds the contact sheet.
  */
 
 export { AvatarController } from "./controller";

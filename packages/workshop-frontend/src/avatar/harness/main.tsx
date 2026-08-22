@@ -10,17 +10,26 @@
  * into a real `AvatarController`. A harness that force-set the state would screenshot poses the
  * event stream might never actually produce.
  *
+ * The v2 renderer is a crossfade, so the *transitions* matter as much as the endpoints: hence the
+ * scripted turn (a realistic event sequence) and the cycle button (every state in turn, paced so a
+ * dissolve is watchable). The reduced-motion column beside the live stage is the only place the
+ * `prefers-reduced-motion` path gets looked at without changing an OS setting.
+ *
  * `window.__avatar` is the Playwright-facing API; see `../README.md` for how it is driven.
  */
 
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AiChatStreamEvent } from "@gadgets/workshop-shared/api";
 import { AvatarController } from "../controller";
-import ChatAvatar from "../ChatAvatar";
-import { describeAvatarState, type AvatarState, type AvatarWorkKind } from "../state";
+import ChatAvatar, { ChatAvatarStatus } from "../ChatAvatar";
+import LenaAvatar from "../LenaAvatar";
+import { describeAvatarState, IDLE_SNAPSHOT, type AvatarState, type AvatarWorkKind } from "../state";
 
 const CHAT_ID = 1;
+
+/** How long the cycle button holds each state. Longer than the 260 ms crossfade, on purpose. */
+const CYCLE_MS = 1100;
 
 /** The tool whose `toolCallStarted` produces each working kind. */
 const TOOL_FOR_KIND: Record<AvatarWorkKind, string> = {
@@ -117,35 +126,79 @@ function burst(from: number, to: number, every: number, event: AiChatStreamEvent
   return out;
 }
 
+/** Every state as the renderer draws it, side by side. Force-set: this is an art sheet. */
+const ART_SHEET: { label: string; state: AvatarState }[] = [
+  { label: "idle", state: { kind: "idle" } },
+  { label: "listening", state: { kind: "listening" } },
+  { label: "thinking", state: { kind: "thinking" } },
+  { label: "talking", state: { kind: "talking" } },
+  ...(["read", "write", "browse", "execute"] as const).map((work) => ({
+    label: `w-${work}`,
+    state: { kind: "working", work } as AvatarState,
+  })),
+  { label: "error", state: { kind: "error" } },
+  { label: "done", state: { kind: "done" } },
+  { label: "paused", state: { kind: "paused" } },
+];
+
 function Harness() {
   const controller = useMemo(() => new AvatarController(), []);
-  const [state, setState] = useState<AvatarState>({ kind: "idle" });
+  const [snapshot, setSnapshot] = useState(IDLE_SNAPSHOT);
   const [note, setNote] = useState("");
   const [dark, setDark] = useState(false);
+  /** Everything the script and the cycle schedule, so a second click cancels the first. */
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {
     controller.setChat(CHAT_ID);
-    return controller.subscribe(() => setState(controller.getSnapshot().state));
+    return controller.subscribe(() => setSnapshot(controller.getSnapshot()));
   }, [controller]);
 
-  const go = (button: StateButton) => {
+  useEffect(() => () => {
+    for (const timer of timers.current) clearTimeout(timer);
+  }, []);
+
+  const reset = () => {
+    for (const timer of timers.current) clearTimeout(timer);
+    timers.current = [];
     controller.setConnectionLost(false);
     controller.setChat(null);
     controller.setChat(CHAT_ID);
+  };
+
+  const go = (button: StateButton) => {
+    reset();
     button.drive(controller);
     setNote(button.label);
   };
 
   const runScript = () => {
-    controller.setConnectionLost(false);
-    controller.setChat(null);
-    controller.setChat(CHAT_ID);
+    reset();
     for (const step of SCRIPT) {
-      setTimeout(() => {
+      timers.current.push(setTimeout(() => {
         step.run(controller);
         setNote(`${step.at} ms — ${step.note}`);
-      }, step.at);
+      }, step.at));
     }
+  };
+
+  /**
+   * Walk every state in order, holding each long enough to watch the dissolve into the next.
+   *
+   * Each step resets the controller the same way the buttons do, so the walk is eleven real
+   * transitions rather than one long latched sequence.
+   */
+  const runCycle = () => {
+    reset();
+    BUTTONS.forEach((button, index) => {
+      timers.current.push(setTimeout(() => {
+        controller.setConnectionLost(false);
+        controller.setChat(null);
+        controller.setChat(CHAT_ID);
+        button.drive(controller);
+        setNote(`cycle — ${button.label}`);
+      }, index * CYCLE_MS));
+    });
   };
 
   // The Playwright-facing surface. Declared here so it closes over the live controller.
@@ -157,6 +210,7 @@ function Harness() {
         go(button);
       },
       script: runScript,
+      cycle: runCycle,
       state: () => controller.getSnapshot().state,
       labels: () => BUTTONS.map((b) => b.label),
     };
@@ -164,6 +218,7 @@ function Harness() {
 
   const bg = dark ? "#1b1d2b" : "#faf9fb";
   const fg = dark ? "#e8e4f2" : "#2b2733";
+  const muted = { opacity: 0.6, fontSize: 11 };
 
   return (
     <div style={{ minHeight: "100vh", background: bg, color: fg, font: "13px/1.5 ui-sans-serif, system-ui", padding: 24 }}>
@@ -191,21 +246,56 @@ function Harness() {
         <button type="button" data-state-button="script" onClick={runScript} style={btn(dark, false)}>
           ▶ scripted turn
         </button>
+        <button type="button" data-state-button="cycle" onClick={runCycle} style={btn(dark, false)}>
+          ↻ cycle states
+        </button>
       </div>
 
-      <div id="avatar-stage" style={{ display: "flex", alignItems: "flex-end", gap: 32, marginBottom: 20 }}>
+      <div id="avatar-stage" style={{ display: "flex", alignItems: "flex-end", gap: 32, marginBottom: 8 }}>
         {[140, 96, 64].map((size) => (
           <figure key={size} style={{ margin: 0, textAlign: "center" }}>
             <ChatAvatar controller={controller} size={size} />
-            <figcaption style={{ marginTop: 8, opacity: 0.6, fontSize: 11 }}>{size}px</figcaption>
+            <figcaption style={{ marginTop: 8, ...muted }}>{size}px</figcaption>
           </figure>
         ))}
+        <figure
+          id="avatar-stage-reduced"
+          style={{ margin: 0, textAlign: "center", paddingLeft: 32, borderLeft: `1px solid ${dark ? "#3b3c58" : "#e4dfee"}` }}
+        >
+          {/*
+            The same live snapshot with motion forced off, so the reduced-motion path is reviewed
+            beside the normal one rather than only when someone changes an OS setting. `reducedMotion`
+            is a QA-only override on the renderer; `ChatAvatar` has no such prop.
+          */}
+          <LenaAvatar snapshot={snapshot} size={96} reducedMotion />
+          <figcaption style={{ marginTop: 8, ...muted }}>96px · reduced motion</figcaption>
+        </figure>
       </div>
 
-      <p data-avatar-readout style={{ margin: 0, fontFamily: "ui-monospace, monospace" }}>
-        state: <strong>{describeAvatarState(state)}</strong>
+      <p data-avatar-readout style={{ margin: "12px 0 0", fontFamily: "ui-monospace, monospace" }}>
+        state: <strong>{describeAvatarState(snapshot.state)}</strong>
         {note !== "" && <span style={{ opacity: 0.6 }}>{"  ·  "}{note}</span>}
+        <span style={{ opacity: 0.6 }}>{"  ·  caption: "}</span>
+        <ChatAvatarStatus controller={controller} />
       </p>
+
+      <section style={{ marginTop: 32, borderTop: `1px solid ${dark ? "#3b3c58" : "#e4dfee"}`, paddingTop: 20 }}>
+        <p style={{ margin: "0 0 14px" }}>
+          <strong>Art sheet</strong>
+          <span style={{ opacity: 0.6 }}>
+            {"  —  every frame at header size, force-set. Not through the mapping: this checks the "}
+            {"art, not the state machine."}
+          </span>
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+          {ART_SHEET.map(({ label, state }) => (
+            <figure key={label} style={{ margin: 0, textAlign: "center", width: 96 }}>
+              <LenaAvatar snapshot={{ state, since: 0 }} size={96} />
+              <figcaption style={{ marginTop: 6, ...muted }}>{label}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
